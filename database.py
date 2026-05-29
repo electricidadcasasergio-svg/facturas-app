@@ -1,0 +1,406 @@
+"""
+database.py — capa de datos para facturas-app.
+Usa PostgreSQL (Supabase) tanto en producción como en desarrollo.
+"""
+import os
+import psycopg2
+import psycopg2.extras
+from contextlib import contextmanager
+
+
+# ── Conexión ──────────────────────────────────────────────────────────────────
+
+def _get_db_url():
+    """Lee DATABASE_URL desde variable de entorno o Streamlit secrets."""
+    url = os.environ.get('DATABASE_URL', '')
+    if not url:
+        try:
+            import streamlit as st
+            url = st.secrets.get('DATABASE_URL', '')
+        except Exception:
+            pass
+    if not url:
+        raise RuntimeError(
+            "DATABASE_URL no configurada.\n"
+            "Agregá la clave en .streamlit/secrets.toml o como variable de entorno."
+        )
+    # Algunos servicios usan "postgres://" pero psycopg2 requiere "postgresql://"
+    if url.startswith('postgres://'):
+        url = 'postgresql://' + url[len('postgres://'):]
+    return url
+
+
+# ── Adaptadores para que psycopg2 funcione como sqlite3 ──────────────────────
+
+class _Row(dict):
+    """Dict que también soporta indexado entero (como sqlite3.Row)."""
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+class _Cursor:
+    """Wrapper de cursor psycopg2 compatible con la API de sqlite3."""
+    def __init__(self, cur):
+        self._cur = cur
+
+    def fetchone(self):
+        row = self._cur.fetchone()
+        return _Row(row) if row else None
+
+    def fetchall(self):
+        return [_Row(r) for r in self._cur.fetchall()]
+
+    def __iter__(self):
+        for row in self._cur:
+            yield _Row(row)
+
+
+class _Conn:
+    """Wrapper de conexión psycopg2 compatible con la API de sqlite3."""
+    def __init__(self, raw):
+        self._raw = raw
+
+    def execute(self, sql, params=()):
+        sql = sql.replace('?', '%s')
+        cur = self._raw.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, params if params else None)
+        return _Cursor(cur)
+
+    def executemany(self, sql, rows):
+        sql = sql.replace('?', '%s')
+        cur = self._raw.cursor()
+        if rows:
+            psycopg2.extras.execute_batch(cur, sql, rows)
+
+    def executescript(self, script):
+        """Ejecuta múltiples sentencias SQL separadas por ';'."""
+        cur = self._raw.cursor()
+        for stmt in script.split(';'):
+            stmt = stmt.strip()
+            if stmt:
+                cur.execute(stmt)
+
+
+@contextmanager
+def get_conn():
+    raw = psycopg2.connect(_get_db_url())
+    conn = _Conn(raw)
+    try:
+        yield conn
+        raw.commit()
+    except Exception:
+        raw.rollback()
+        raise
+    finally:
+        raw.close()
+
+
+# ── Creación de tablas ────────────────────────────────────────────────────────
+
+def init_db():
+    with get_conn() as conn:
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS proveedores (
+            id              BIGSERIAL PRIMARY KEY,
+            nombre          TEXT NOT NULL,
+            cuit            TEXT UNIQUE,
+            moneda_default  TEXT DEFAULT 'ARS',
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS facturas (
+            id              BIGSERIAL PRIMARY KEY,
+            proveedor_id    BIGINT NOT NULL,
+            numero          TEXT UNIQUE NOT NULL,
+            fecha           TEXT NOT NULL,
+            subtotal        REAL DEFAULT 0,
+            iva_21          REAL DEFAULT 0,
+            iva_105         REAL DEFAULT 0,
+            percepciones    REAL DEFAULT 0,
+            total           REAL DEFAULT 0,
+            moneda          TEXT DEFAULT 'ARS',
+            tipo_cambio     REAL DEFAULT 1.0,
+            archivo_nombre  TEXT,
+            cae             TEXT,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (proveedor_id) REFERENCES proveedores(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS items (
+            id               BIGSERIAL PRIMARY KEY,
+            factura_id       BIGINT NOT NULL,
+            sku              TEXT NOT NULL,
+            descripcion      TEXT,
+            cantidad         REAL DEFAULT 0,
+            precio_unit      REAL DEFAULT 0,
+            descuento_pct    REAL DEFAULT 0,
+            precio_neto_unit REAL DEFAULT 0,
+            iva_pct          REAL DEFAULT 21.0,
+            subtotal_siva    REAL DEFAULT 0,
+            moneda           TEXT DEFAULT 'ARS',
+            FOREIGN KEY (factura_id) REFERENCES facturas(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_items_sku      ON items(sku);
+        CREATE INDEX IF NOT EXISTS idx_items_factura  ON items(factura_id);
+        CREATE INDEX IF NOT EXISTS idx_facturas_fecha ON facturas(fecha);
+        CREATE INDEX IF NOT EXISTS idx_facturas_prov  ON facturas(proveedor_id)
+        """)
+
+
+# ── Utilidades de fecha ───────────────────────────────────────────────────────
+
+def _to_iso(fecha_str):
+    """'27/04/2026' → '2026-04-27'. Acepta también formato ISO."""
+    if not fecha_str:
+        return None
+    s = str(fecha_str).strip()
+    if len(s) == 10 and s[2] == '/':
+        d, m, y = s.split('/')
+        return f"{y}-{m}-{d}"
+    return s
+
+
+def _to_display(fecha_iso):
+    """'2026-04-27' → '27/04/2026'."""
+    if not fecha_iso:
+        return ''
+    s = str(fecha_iso).strip()
+    if len(s) == 10 and s[4] == '-':
+        y, m, d = s.split('-')
+        return f"{d}/{m}/{y}"
+    return s
+
+
+# ── Escritura ─────────────────────────────────────────────────────────────────
+
+def upsert_proveedor(nombre, cuit, moneda_default='ARS'):
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO proveedores (nombre, cuit, moneda_default)
+            VALUES (?, ?, ?)
+            ON CONFLICT(cuit) DO UPDATE SET nombre = excluded.nombre
+        """, (nombre, cuit, moneda_default))
+        row = conn.execute(
+            "SELECT id FROM proveedores WHERE cuit = ?", (cuit,)
+        ).fetchone()
+        return row['id']
+
+
+def insert_factura(proveedor_id, numero, fecha, subtotal, iva_21, iva_105,
+                   percepciones, total, moneda, tipo_cambio, archivo_nombre, cae):
+    fecha_iso = _to_iso(fecha)
+    with get_conn() as conn:
+        # ON CONFLICT DO NOTHING → devuelve None si ya existe (número duplicado)
+        row = conn.execute("""
+            INSERT INTO facturas
+                (proveedor_id, numero, fecha, subtotal, iva_21, iva_105,
+                 percepciones, total, moneda, tipo_cambio, archivo_nombre, cae)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (numero) DO NOTHING
+            RETURNING id
+        """, (proveedor_id, numero, fecha_iso, subtotal, iva_21, iva_105,
+              percepciones, total, moneda, tipo_cambio, archivo_nombre, cae)
+        ).fetchone()
+        return row['id'] if row else None
+
+
+def insert_items(factura_id, items):
+    rows = [(
+        factura_id,
+        it['sku'],
+        it.get('descripcion', ''),
+        it.get('cantidad', 0),
+        it.get('precio_unit', 0),
+        it.get('descuento_pct', 0),
+        it.get('precio_neto_unit', 0),
+        it.get('iva_pct', 21.0),
+        it.get('subtotal_siva', 0),
+        it.get('moneda', 'ARS'),
+    ) for it in items]
+    with get_conn() as conn:
+        conn.executemany("""
+            INSERT INTO items
+                (factura_id, sku, descripcion, cantidad, precio_unit,
+                 descuento_pct, precio_neto_unit, iva_pct, subtotal_siva, moneda)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, rows)
+
+
+# ── Lectura ───────────────────────────────────────────────────────────────────
+
+def get_proveedores():
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM proveedores ORDER BY nombre"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_facturas(proveedor_id=None, fecha_desde=None, fecha_hasta=None):
+    q = """
+        SELECT f.*, p.nombre AS proveedor_nombre, p.cuit AS proveedor_cuit
+        FROM facturas f
+        JOIN proveedores p ON f.proveedor_id = p.id
+        WHERE 1=1
+    """
+    params = []
+    if proveedor_id:
+        q += " AND f.proveedor_id = ?"
+        params.append(proveedor_id)
+    if fecha_desde:
+        q += " AND f.fecha >= ?"
+        params.append(fecha_desde)
+    if fecha_hasta:
+        q += " AND f.fecha <= ?"
+        params.append(fecha_hasta)
+    q += " ORDER BY f.fecha DESC"
+    with get_conn() as conn:
+        rows = conn.execute(q, params).fetchall()
+        result = [dict(r) for r in rows]
+    for r in result:
+        r['fecha_display'] = _to_display(r['fecha'])
+    return result
+
+
+def get_items_by_sku(sku, proveedor_id=None):
+    q = """
+        SELECT i.*, f.fecha, f.numero AS factura_numero,
+               f.tipo_cambio, p.nombre AS proveedor_nombre
+        FROM items i
+        JOIN facturas f ON i.factura_id = f.id
+        JOIN proveedores p ON f.proveedor_id = p.id
+        WHERE i.sku = ?
+    """
+    params = [sku]
+    if proveedor_id:
+        q += " AND f.proveedor_id = ?"
+        params.append(proveedor_id)
+    q += " ORDER BY f.fecha"
+    with get_conn() as conn:
+        rows = conn.execute(q, params).fetchall()
+        result = [dict(r) for r in rows]
+    for r in result:
+        r['fecha_display'] = _to_display(r['fecha'])
+    return result
+
+
+def search_skus(query_str, proveedor_id=None):
+    q = """
+        SELECT i.sku, i.descripcion, i.moneda,
+               p.nombre AS proveedor_nombre, p.id AS proveedor_id,
+               COUNT(DISTINCT f.id)  AS veces_comprado,
+               SUM(i.cantidad)       AS total_unidades,
+               MAX(f.fecha)          AS ultima_compra_iso
+        FROM items i
+        JOIN facturas f ON i.factura_id = f.id
+        JOIN proveedores p ON f.proveedor_id = p.id
+        WHERE (i.sku LIKE ? OR i.descripcion LIKE ?)
+    """
+    params = [f'%{query_str}%', f'%{query_str}%']
+    if proveedor_id:
+        q += " AND f.proveedor_id = ?"
+        params.append(proveedor_id)
+    q += " GROUP BY i.sku, i.descripcion, i.moneda, p.nombre, p.id ORDER BY veces_comprado DESC LIMIT 50"
+    with get_conn() as conn:
+        rows = conn.execute(q, params).fetchall()
+        result = [dict(r) for r in rows]
+    for r in result:
+        r['ultima_compra'] = _to_display(r.get('ultima_compra_iso', ''))
+    return result
+
+
+def get_resumen_proveedor(proveedor_id):
+    with get_conn() as conn:
+        stats = conn.execute("""
+            SELECT
+                COUNT(*)           AS n_facturas,
+                MIN(fecha)         AS primera_iso,
+                MAX(fecha)         AS ultima_iso,
+                SUM(CASE WHEN moneda='ARS' THEN subtotal ELSE 0 END) AS total_ars,
+                SUM(CASE WHEN moneda='USD' THEN total    ELSE 0 END) AS total_usd
+            FROM facturas
+            WHERE proveedor_id = ?
+        """, (proveedor_id,)).fetchone()
+        n_skus = conn.execute("""
+            SELECT COUNT(DISTINCT i.sku) AS n_skus
+            FROM items i
+            JOIN facturas f ON i.factura_id = f.id
+            WHERE f.proveedor_id = ?
+        """, (proveedor_id,)).fetchone()['n_skus']
+    d = dict(stats)
+    d['n_skus'] = n_skus
+    d['primera'] = _to_display(d.pop('primera_iso', ''))
+    d['ultima']  = _to_display(d.pop('ultima_iso',  ''))
+    return d
+
+
+def comparar_entre_proveedores(keyword):
+    like = f'%{keyword}%'
+    with get_conn() as conn:
+        resumen = conn.execute("""
+            SELECT
+                p.nombre            AS proveedor,
+                i.sku               AS codigo,
+                i.descripcion,
+                i.moneda,
+                COUNT(DISTINCT f.id)        AS facturas,
+                SUM(i.cantidad)             AS total_unidades,
+                MIN(i.precio_neto_unit)     AS precio_min,
+                MAX(i.precio_neto_unit)     AS precio_max,
+                ROUND(AVG(i.precio_neto_unit)::numeric, 2) AS precio_prom,
+                MAX(f.fecha)        AS ultima_compra_iso
+            FROM items i
+            JOIN facturas f ON i.factura_id = f.id
+            JOIN proveedores p ON f.proveedor_id = p.id
+            WHERE i.descripcion LIKE ?
+              AND i.precio_neto_unit > 0
+            GROUP BY p.id, p.nombre, i.sku, i.descripcion, i.moneda
+            ORDER BY i.descripcion, precio_prom
+        """, (like,)).fetchall()
+
+        detalle = conn.execute("""
+            SELECT
+                p.nombre            AS proveedor,
+                i.sku               AS codigo,
+                i.descripcion,
+                f.fecha,
+                i.precio_neto_unit  AS precio_neto,
+                i.cantidad,
+                i.moneda
+            FROM items i
+            JOIN facturas f ON i.factura_id = f.id
+            JOIN proveedores p ON f.proveedor_id = p.id
+            WHERE i.descripcion LIKE ?
+              AND i.precio_neto_unit > 0
+            ORDER BY i.descripcion, f.fecha
+        """, (like,)).fetchall()
+
+    resumen_list = [dict(r) for r in resumen]
+    for r in resumen_list:
+        r['ultima_compra'] = _to_display(r.pop('ultima_compra_iso', ''))
+
+    detalle_list = [dict(r) for r in detalle]
+    for d in detalle_list:
+        d['fecha_display'] = _to_display(d['fecha'])
+
+    return resumen_list, detalle_list
+
+
+def get_compras_por_mes(proveedor_id=None):
+    # LEFT(fecha, 7) extrae 'YYYY-MM' de la fecha en formato texto 'YYYY-MM-DD'
+    q = """
+        SELECT LEFT(fecha, 7) AS mes,
+               SUM(CASE WHEN moneda='ARS' THEN subtotal ELSE subtotal * tipo_cambio END) AS total_ars
+        FROM facturas
+        WHERE 1=1
+    """
+    params = []
+    if proveedor_id:
+        q += " AND proveedor_id = ?"
+        params.append(proveedor_id)
+    q += " GROUP BY mes ORDER BY mes"
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(q, params).fetchall()]
