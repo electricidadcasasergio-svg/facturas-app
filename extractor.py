@@ -59,12 +59,32 @@ def _parse_num(s, context='price'):
 
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'}
 
-def extract_invoice(pdf_path):
-    """Acepta PDF o imagen (JPG/PNG). Detecta automáticamente."""
+def quick_get_cuit(pdf_path):
+    """
+    Escaneo rápido de la primera página para obtener el CUIT.
+    Se usa ANTES de la extracción completa para cargar el config del proveedor.
+    """
+    try:
+        path = Path(pdf_path)
+        if path.suffix.lower() in IMAGE_EXTS:
+            return None
+        with pdfplumber.open(path) as pdf:
+            text = (pdf.pages[0].extract_text() or '') if pdf.pages else ''
+        cuits = re.findall(r'\d{2}-\d{8}-\d', text)
+        return cuits[0] if cuits else None
+    except Exception:
+        return None
+
+
+def extract_invoice(pdf_path, config=None):
+    """
+    Acepta PDF o imagen (JPG/PNG). Detecta automáticamente.
+    config: dict con perfil del proveedor (aprendido de facturas anteriores).
+    """
     path = Path(pdf_path)
     if path.suffix.lower() in IMAGE_EXTS:
         return _extract_from_image(path)
-    return _extract_from_pdf(path)
+    return _extract_from_pdf(path, config=config)
 
 
 def _extract_from_image(path):
@@ -114,7 +134,7 @@ def _extract_from_image(path):
     return _parse_full(text, path.name)
 
 
-def _extract_from_pdf(path):
+def _extract_from_pdf(path, config=None):
     """Extracción estándar desde PDF con pdfplumber."""
     with pdfplumber.open(path) as pdf:
         pages_text   = [p.extract_text() or '' for p in pdf.pages]
@@ -123,15 +143,17 @@ def _extract_from_pdf(path):
     full_text  = '\n'.join(pages_text)
     all_tables = [t for page in pages_tables for t in page]
 
-    return _parse_full(full_text, path.name, all_tables)
+    return _parse_full(full_text, path.name, all_tables, config=config)
 
 
-def _parse_full(text, filename, tables=None):
+def _parse_full(text, filename, tables=None, config=None):
     """Parsea header + ítems desde texto (y opcionalmente tablas pdfplumber)."""
     if tables is None:
         tables = []
 
     header = _parse_header(text, filename)
+
+    discovered_config = {}   # se llenará si se usa el parser genérico
 
     # Rutear al parser del proveedor según CUIT detectado en el texto
     if '30-66180083-2' in text:
@@ -150,13 +172,19 @@ def _parse_full(text, filename, tables=None):
         header.setdefault('proveedor_nombre', 'PRIOLO DANIEL ROBERTO')
         items = _items_priolo(text)
     else:
-        items = _items_generic(tables, text)
+        header_hint = config.get('header_trigger') if config else None
+        items = _items_generic(tables, text,
+                               header_hint=header_hint,
+                               discovered=discovered_config)
 
     moneda = header.get('moneda', 'ARS')
     for it in items:
         it.setdefault('moneda', moneda)
 
-    return {**header, 'items': items}
+    result = {**header, 'items': items}
+    if discovered_config:
+        result['_discovered_config'] = discovered_config
+    return result
 
 
 # ── Parser de cabecera (genérico) ─────────────────────────────────────────────
@@ -642,7 +670,7 @@ def _items_priolo(text):
 
 # ── Parser genérico ────────────────────────────────────────────────────────────
 
-def _items_generic(tables, text):
+def _items_generic(tables, text, header_hint=None, discovered=None):
     """Intenta tabla pdfplumber primero; si no hay nada, parsea el texto libre."""
 
     items = _extract_table_items(
@@ -661,66 +689,83 @@ def _items_generic(tables, text):
     if items:
         return items
 
-    return _items_generic_text(text)
+    return _items_generic_text(text, header_hint=header_hint, discovered=discovered)
 
 
-def _items_generic_text(text):
+def _items_generic_text(text, header_hint=None, discovered=None):
     """
-    Extracción genérica por texto libre.
+    Extracción genérica por texto libre, con soporte de aprendizaje por CUIT.
 
     Principio: en cualquier factura argentina los ítems siguen el patrón
         [SKU/código]  [descripción]  [números al final: precio / subtotal]
 
-    1. Detectar la línea de encabezado de la tabla (Código/Descripción/Precio…)
-    2. Por cada línea posterior:
-         a. Separar tokens numéricos del final → precios
-         b. El primer token alfanumérico que parezca código → SKU
-         c. El resto → descripción
-    3. Parar al encontrar el pie de factura (Subtotal / Total / IVA / CAE…)
+    Parámetros:
+        header_hint  : línea de encabezado conocida del proveedor (de facturas previas)
+        discovered   : dict vacío → se llena con {'header_trigger': ..., 'sku_offset': ...}
+                       para guardar en el perfil del proveedor.
+
+    Proceso:
+        1. PASADA 1: encontrar la línea de encabezado de la tabla de ítems.
+           Si hay hint, se usa ese fragmento antes de intentar la detección genérica.
+        2. PASADA 2: parsear líneas de ítems tras el encabezado.
     """
 
     # ── Patrones de detección ─────────────────────────────────────────────────
 
-    # Encabezado de tabla: debe mencionar algún sinónimo de "código" Y "descripción/precio"
+    # Encabezado de tabla: sinónimo de "código" + "descripción/precio"
     HDR = re.compile(
         r'(?:C[OÓ]D(?:IGO)?|SKU|ART[IÍ]CULO|PRODUCTO|ITEM)\b.{0,80}'
         r'(?:DESCRIP|DETALLE|DENOMIN|PRECIO|IMPORTE|TOTAL)',
         re.IGNORECASE
     )
 
-    # Pie de factura → dejar de leer ítems
+    # Pie de factura → parar
     FOOTER = re.compile(
         r'^\s*(?:SUB[\s-]?TOTAL|TOTAL\b|I\.?V\.?A\.?\b|PERCEP|C\.?A\.?E\.?\b|'
         r'Son\s+pesos|BONIF|CHEQUES|CONDICI[OÓ]N\s+DE\s+VENTA|VENCIM)',
         re.IGNORECASE
     )
 
-    # Token que parece un SKU (alfanumérico, puede tener guión/punto/barra)
-    SKU_RE = re.compile(r'^[A-Z0-9][A-Z0-9\-./]{0,29}$', re.IGNORECASE)
-
-    # Palabras del lenguaje cotidiano que no son SKUs
+    SKU_RE   = re.compile(r'^[A-Z0-9][A-Z0-9\-./]{0,29}$', re.IGNORECASE)
     STOPWORDS = re.compile(
         r'^(?:DE|EL|LA|LOS|LAS|UN|UNA|Y|O|POR|CON|SIN|PARA|QUE|AL|DEL|EN|A|'
-        r'NO|NI|SU|MAS|MÁS|SI|MI|ME|TE|LE|ES|HA|HI|HO|SE|SER|CON|SUS)$',
+        r'NO|NI|SU|MAS|MÁS|SI|MI|ME|TE|LE|ES|HA|HI|HO|SE|SER|SUS)$',
         re.IGNORECASE
     )
-
     NUM_RE = re.compile(r'^[\d.,]+$')
 
-    # ── Recorrida de líneas ───────────────────────────────────────────────────
-
     lines = text.split('\n')
-    items = []
-    in_table = False
 
-    for line in lines:
-        # --- esperar el encabezado ---
-        if not in_table:
+    # ── PASADA 1: localizar encabezado ────────────────────────────────────────
+
+    header_idx        = None
+    found_header_line = None
+
+    # Primero intentar con el hint guardado (más rápido y confiable)
+    if header_hint:
+        for i, line in enumerate(lines):
+            if header_hint.upper() in line.upper():
+                header_idx        = i
+                found_header_line = line.strip()
+                break
+
+    # Si el hint no funcionó, usar detección genérica
+    if header_idx is None:
+        for i, line in enumerate(lines):
             if HDR.search(line):
-                in_table = True
-            continue
+                header_idx        = i
+                found_header_line = line.strip()
+                break
 
-        # --- detectar fin de tabla ---
+    if header_idx is None:
+        return []   # factura sin tabla de ítems reconocible
+
+    # ── PASADA 2: parsear ítems ───────────────────────────────────────────────
+
+    items      = []
+    sku_offsets = []   # para calcular sku_offset promedio
+
+    for line in lines[header_idx + 1:]:
         if FOOTER.match(line):
             break
 
@@ -732,8 +777,7 @@ def _items_generic_text(text):
         if len(tokens) < 2:
             continue
 
-        # --- separar números del lado derecho (hasta 5) ---
-        # Recorremos de derecha a izquierda mientras sean numéricos puros
+        # Separar números del lado derecho (hasta 5)
         split_pos = len(tokens)
         tail = []
         for k in range(len(tokens) - 1, -1, -1):
@@ -744,58 +788,51 @@ def _items_generic_text(text):
                 break
 
         if not tail:
-            continue  # línea sin ningún número → no es ítem
+            continue
 
-        left = tokens[:split_pos]  # parte izquierda: ordinal? + qty? + unidad? + sku + descripción
+        left = tokens[:split_pos]
 
-        # --- identificar SKU: primer token código-like en "left" ---
-        sku = None
+        # Identificar SKU: primer token código-like
+        sku     = None
         sku_pos = 0
-
         for i, tok in enumerate(left):
-            # Saltar número de orden puro al inicio (1, 2, 3 … 99)
             if i == 0 and re.match(r'^\d{1,2}$', tok):
-                continue
+                continue   # saltar ordinal de ítem
             if SKU_RE.match(tok) and not STOPWORDS.match(tok):
-                sku = tok.upper()
+                sku     = tok.upper()
                 sku_pos = i
                 break
 
         if not sku:
             continue
 
-        # --- descripción: tokens después del SKU (sin % sueltos de IVA) ---
-        desc_parts = left[sku_pos + 1:]
-        # Quitar tokens del tipo "21.00%" o "10,5%" que son columnas de IVA/descuento
-        desc_parts = [t for t in desc_parts if not re.match(r'^\d+[.,]?\d*\s*%$', t)]
+        # Descripción: tokens entre SKU y los números, sin "21.00%" etc.
+        desc_parts = [t for t in left[sku_pos + 1:]
+                      if not re.match(r'^\d+[.,]?\d*\s*%$', t)]
         descripcion = ' '.join(desc_parts).strip()
 
-        # --- asignar precios (de derecha a izquierda) ---
-        # tail[-1] = subtotal/total  |  tail[-2] = precio unitario (si existe)
+        # Precios
         subtotal    = _parse_num(tail[-1])
         precio_unit = _parse_num(tail[-2]) if len(tail) >= 2 else 0.0
-
         if precio_unit == 0 and subtotal > 0:
-            precio_unit = subtotal  # un solo número → usarlo como precio
+            precio_unit = subtotal
 
         if subtotal == 0 and precio_unit == 0:
             continue
 
-        # --- cantidad: buscar en los tokens ANTES del SKU ---
-        # Ej: "1 2,000.00 nº 56KL …" → left[0]='1'(ordinal), left[1]='2,000.00'(qty)
-        qty = 1.0
+        # Cantidad (tokens numéricos antes del SKU, saltar ordinal)
+        qty     = 1.0
         pre_sku = left[:sku_pos]
         nums_pre = [t for t in pre_sku if NUM_RE.match(t)]
         if nums_pre:
             if len(nums_pre) == 1:
                 val = nums_pre[0]
-                # Si es un pequeño entero (≤99) probablemente es ordinal → ignorar
                 if not (re.match(r'^\d{1,2}$', val) and int(val) <= 99):
                     qty = _parse_num(val, context='qty')
             else:
-                # Primer número = ordinal → el último es la cantidad real
                 qty = _parse_num(nums_pre[-1], context='qty')
 
+        sku_offsets.append(sku_pos)
         items.append({
             'sku':              sku,
             'descripcion':      descripcion,
@@ -806,6 +843,14 @@ def _items_generic_text(text):
             'iva_pct':          21.0,
             'subtotal_siva':    subtotal,
         })
+
+    # ── Guardar config descubierto ────────────────────────────────────────────
+
+    if discovered is not None and found_header_line:
+        discovered['header_trigger'] = found_header_line.upper()
+        if sku_offsets:
+            # posición más frecuente del SKU en las líneas de ítems
+            discovered['sku_offset'] = max(set(sku_offsets), key=sku_offsets.count)
 
     return items
 

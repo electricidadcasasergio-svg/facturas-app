@@ -3,6 +3,7 @@ database.py — capa de datos para facturas-app.
 Usa SQLite local (archivo data/facturas.db).
 """
 import os
+import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -81,6 +82,12 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_items_factura  ON items(factura_id);
         CREATE INDEX IF NOT EXISTS idx_facturas_fecha ON facturas(fecha);
         CREATE INDEX IF NOT EXISTS idx_facturas_prov  ON facturas(proveedor_id);
+
+        CREATE TABLE IF NOT EXISTS proveedor_config (
+            cuit        TEXT PRIMARY KEY,
+            config_json TEXT NOT NULL,
+            updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         """)
 
 
@@ -323,6 +330,31 @@ def comparar_entre_proveedores(keyword):
         d['fecha_display'] = _to_display(d['fecha'])
 
     return resumen_list, detalle_list
+
+
+def get_proveedor_config(cuit):
+    """Devuelve el config de extracción guardado para un CUIT, o None si no existe."""
+    if not cuit:
+        return None
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT config_json FROM proveedor_config WHERE cuit = ?", (cuit,)
+        ).fetchone()
+    return json.loads(row['config_json']) if row else None
+
+
+def save_proveedor_config(cuit, config):
+    """Guarda o actualiza el perfil de extracción para un CUIT."""
+    if not cuit or not config:
+        return
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO proveedor_config (cuit, config_json)
+            VALUES (?, ?)
+            ON CONFLICT(cuit) DO UPDATE SET
+                config_json = excluded.config_json,
+                updated_at  = CURRENT_TIMESTAMP
+        """, (cuit, json.dumps(config, ensure_ascii=False)))
 
 
 def get_compras_por_mes(proveedor_id=None):

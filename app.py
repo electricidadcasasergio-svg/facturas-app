@@ -99,6 +99,9 @@ elif page == "📤 Subir Facturas":
     if not uploaded:
         st.stop()
 
+    ITEM_COLS = ['sku', 'descripcion', 'cantidad', 'precio_unit',
+                 'descuento_pct', 'precio_neto_unit', 'iva_pct', 'subtotal_siva']
+
     for f in uploaded:
         # Guardar temporalmente preservando la extensión original
         suffix = Path(f.name).suffix.lower()
@@ -106,9 +109,13 @@ elif page == "📤 Subir Facturas":
             tmp.write(f.read())
             tmp_path = tmp.name
 
+        # Pre-cargar config del proveedor (si ya fue procesado antes)
+        cuit_hint       = extractor.quick_get_cuit(tmp_path)
+        proveedor_config = db.get_proveedor_config(cuit_hint) if cuit_hint else None
+
         with st.spinner(f"Procesando **{f.name}**…"):
             try:
-                data = extractor.extract_invoice(tmp_path)
+                data = extractor.extract_invoice(tmp_path, config=proveedor_config)
                 data['archivo_nombre'] = f.name
                 error = None
             except Exception as e:
@@ -129,6 +136,10 @@ elif page == "📤 Subir Facturas":
         )
 
         with st.expander(label, expanded=True):
+
+            # Indicador de proveedor conocido
+            if proveedor_config:
+                st.success("✅ Proveedor conocido — se usó perfil guardado de facturas anteriores.")
 
             # ── Campos editables ─────────────────────────────────────────
             st.markdown("#### Datos del encabezado")
@@ -170,20 +181,46 @@ elif page == "📤 Subir Facturas":
             else:
                 tc = 1.0
 
-            # ── Ítems extraídos ──────────────────────────────────────────
-            st.markdown("#### Ítems extraídos")
-            if items:
-                cols_show = [c for c in
-                    ['sku', 'descripcion', 'cantidad', 'precio_unit',
-                     'descuento_pct', 'precio_neto_unit', 'iva_pct', 'subtotal_siva']
-                    if c in items[0]]
-                st.dataframe(pd.DataFrame(items)[cols_show], use_container_width=True)
-                st.caption(f"{len(items)} ítems detectados")
-            else:
+            # ── Ítems — tabla editable ───────────────────────────────────
+            st.markdown("#### Ítems")
+            if not items:
                 st.warning(
                     "⚠️ No se encontraron ítems automáticamente. "
-                    "Podés guardar igual el encabezado de la factura."
+                    "Podés agregarlos manualmente en la tabla de abajo."
                 )
+
+            # Preparar DataFrame con las columnas estándar
+            df_items = (
+                pd.DataFrame(items).reindex(columns=ITEM_COLS)
+                if items
+                else pd.DataFrame(columns=ITEM_COLS)
+            )
+            # Valores por defecto para columnas numéricas
+            for col, default in [('cantidad', 1.0), ('precio_unit', 0.0),
+                                  ('descuento_pct', 0.0), ('precio_neto_unit', 0.0),
+                                  ('iva_pct', 21.0), ('subtotal_siva', 0.0)]:
+                df_items[col] = pd.to_numeric(df_items.get(col, default), errors='coerce').fillna(default)
+            df_items['sku']         = df_items.get('sku', '').fillna('').astype(str)
+            df_items['descripcion'] = df_items.get('descripcion', '').fillna('').astype(str)
+
+            edited_items_df = st.data_editor(
+                df_items,
+                column_config={
+                    'sku':              st.column_config.TextColumn('Código / SKU',   required=True),
+                    'descripcion':      st.column_config.TextColumn('Descripción'),
+                    'cantidad':         st.column_config.NumberColumn('Cantidad',      format="%.2f"),
+                    'precio_unit':      st.column_config.NumberColumn('Precio lista',  format="%.4f"),
+                    'descuento_pct':    st.column_config.NumberColumn('Dto %',         format="%.2f"),
+                    'precio_neto_unit': st.column_config.NumberColumn('Precio neto',   format="%.4f"),
+                    'iva_pct':          st.column_config.NumberColumn('IVA %',         format="%.1f"),
+                    'subtotal_siva':    st.column_config.NumberColumn('Subtotal s/IVA', format="%.2f"),
+                },
+                num_rows="dynamic",
+                use_container_width=True,
+                key=f"items_{f.name}",
+            )
+            n_items = len(edited_items_df[edited_items_df['sku'].str.strip() != ''])
+            st.caption(f"{n_items} ítem(s)  —  podés agregar/editar/eliminar filas directamente en la tabla.")
 
             # ── Guardar ──────────────────────────────────────────────────
             if not prov_nombre:
@@ -191,6 +228,15 @@ elif page == "📤 Subir Facturas":
             elif not fac_numero:
                 st.error("Completá el número de factura antes de guardar.")
             elif st.button("💾 Guardar en base de datos", key=f"save_{f.name}"):
+                # Tomar ítems del editor (solo filas con SKU no vacío)
+                items_to_save = [
+                    row for row in edited_items_df.to_dict('records')
+                    if str(row.get('sku', '')).strip()
+                ]
+                # Asegurar moneda en cada ítem
+                for it in items_to_save:
+                    it.setdefault('moneda', moneda)
+
                 try:
                     prov_id = db.upsert_proveedor(
                         prov_nombre,
@@ -212,9 +258,18 @@ elif page == "📤 Subir Facturas":
                         data.get('cae', ''),
                     )
                     if fac_id:
-                        if items:
-                            db.insert_items(fac_id, items)
-                        st.success(f"✅ Guardada — proveedor: **{prov_nombre}** — {len(items)} ítems.")
+                        if items_to_save:
+                            db.insert_items(fac_id, items_to_save)
+
+                        # Guardar perfil del proveedor para mejorar futuras extracciones
+                        discovered = data.get('_discovered_config', {})
+                        if discovered and prov_cuit:
+                            db.save_proveedor_config(prov_cuit, discovered)
+
+                        st.success(
+                            f"✅ Guardada — **{prov_nombre}** — {len(items_to_save)} ítems."
+                            + (" 🧠 Perfil de proveedor aprendido." if discovered and prov_cuit else "")
+                        )
                     else:
                         st.warning("⚠️ Esta factura ya estaba cargada (número duplicado).")
                 except Exception as e:
