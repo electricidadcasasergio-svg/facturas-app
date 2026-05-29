@@ -345,9 +345,12 @@ elif page == "📄 Facturas":
 
         col_si, col_no = st.columns([1, 4])
         if col_si.button("🗑️ Sí, eliminar", key=f"del_{fac_id_del}", type="primary"):
-            db.delete_factura(fac_id_del)
-            st.success("✅ Factura eliminada correctamente.")
-            st.rerun()
+            if not hasattr(db, 'delete_factura'):
+                st.error("⚠️ El programa no está actualizado. Ejecutá ACTUALIZAR.bat y volvé a intentar.")
+            else:
+                db.delete_factura(fac_id_del)
+                st.success("✅ Factura eliminada correctamente.")
+                st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
