@@ -331,6 +331,24 @@ elif page == "📄 Facturas":
         + (f"  |  Total USD: **U$S {total_usd:,.2f}**" if total_usd else "")
     )
 
+    # ── Eliminar factura ─────────────────────────────────────────────────────
+    st.divider()
+    with st.expander("🗑️ Eliminar una factura"):
+        opciones = {
+            f"{f['numero']}  —  {f['proveedor_nombre']}  —  {f['fecha_display']}": f['id']
+            for f in facturas
+        }
+        seleccion = st.selectbox("Seleccioná la factura a eliminar", list(opciones.keys()))
+        fac_id_del = opciones[seleccion]
+
+        st.warning(f"⚠️ Esto eliminará la factura **{seleccion}** y todos sus ítems. Esta acción no se puede deshacer.")
+
+        col_si, col_no = st.columns([1, 4])
+        if col_si.button("🗑️ Sí, eliminar", key=f"del_{fac_id_del}", type="primary"):
+            db.delete_factura(fac_id_del)
+            st.success("✅ Factura eliminada correctamente.")
+            st.rerun()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 🔍  SKUs

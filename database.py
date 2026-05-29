@@ -174,6 +174,13 @@ def insert_items(factura_id, items):
 
 # ── Lectura ───────────────────────────────────────────────────────────────────
 
+def delete_factura(factura_id):
+    """Elimina una factura y todos sus ítems."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM items    WHERE factura_id = ?", (factura_id,))
+        conn.execute("DELETE FROM facturas WHERE id = ?",         (factura_id,))
+
+
 def get_proveedores():
     with get_conn() as conn:
         rows = conn.execute(
