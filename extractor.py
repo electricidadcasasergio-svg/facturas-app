@@ -179,6 +179,7 @@ def _parse_header(text, filename):
         r'(?:Fecha[^\n:]*:|FECHA:)\s*(\d{2}/\d{2}/\d{4})',
         r'(?:Fecha\s+emisi[oó]n:?\s*)(\d{2}/\d{2}/\d{4})',
         r'\bFecha:\s*(\d{2}/\d{2}/\d{4})',
+        r'\b(\d{2}/\d{2}/\d{4})\b',          # fallback: primera fecha que aparezca
     ]:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
@@ -613,19 +614,157 @@ def _items_priolo(text):
 # ── Parser genérico ────────────────────────────────────────────────────────────
 
 def _items_generic(tables, text):
-    return _extract_table_items(
+    """Intenta tabla pdfplumber primero; si no hay nada, parsea el texto libre."""
+
+    items = _extract_table_items(
         tables,
         header_keywords=('ARTICULO', 'CODIGO', 'COD', 'SKU'),
         col_map={
-            'sku':          ('ARTICULO', 'CODIGO', 'COD', 'SKU', 'ITEM'),
-            'descripcion':  ('DESCRIPCION', 'DETALLE', 'DESCRIPCI', 'DENOMINACION'),
-            'cantidad':     ('CANTIDAD', 'CANT', 'QTY'),
-            'precio_unit':  ('PRECIO UNIT', 'PRECIO', 'P. UNIT'),
-            'subtotal_siva':('TOTAL', 'SUBTOTAL', 'NETO', 'IMPORTE'),
+            'sku':           ('ARTICULO', 'CODIGO', 'COD', 'SKU', 'ITEM'),
+            'descripcion':   ('DESCRIPCION', 'DETALLE', 'DESCRIPCI', 'DENOMINACION'),
+            'cantidad':      ('CANTIDAD', 'CANT', 'QTY'),
+            'precio_unit':   ('PRECIO UNIT', 'PRECIO', 'P. UNIT'),
+            'subtotal_siva': ('TOTAL', 'SUBTOTAL', 'NETO', 'IMPORTE'),
         },
         sku_pattern=r'^[A-Z0-9]',
         qty_context='qty',
     )
+    if items:
+        return items
+
+    return _items_generic_text(text)
+
+
+def _items_generic_text(text):
+    """
+    Extracción genérica por texto libre.
+
+    Principio: en cualquier factura argentina los ítems siguen el patrón
+        [SKU/código]  [descripción]  [números al final: precio / subtotal]
+
+    1. Detectar la línea de encabezado de la tabla (Código/Descripción/Precio…)
+    2. Por cada línea posterior:
+         a. Separar tokens numéricos del final → precios
+         b. El primer token alfanumérico que parezca código → SKU
+         c. El resto → descripción
+    3. Parar al encontrar el pie de factura (Subtotal / Total / IVA / CAE…)
+    """
+
+    # ── Patrones de detección ─────────────────────────────────────────────────
+
+    # Encabezado de tabla: debe mencionar algún sinónimo de "código" Y "descripción/precio"
+    HDR = re.compile(
+        r'(?:C[OÓ]D(?:IGO)?|SKU|ART[IÍ]CULO|PRODUCTO|ITEM)\b.{0,80}'
+        r'(?:DESCRIP|DETALLE|DENOMIN|PRECIO|IMPORTE|TOTAL)',
+        re.IGNORECASE
+    )
+
+    # Pie de factura → dejar de leer ítems
+    FOOTER = re.compile(
+        r'^\s*(?:SUB[\s-]?TOTAL|TOTAL\b|I\.?V\.?A\.?\b|PERCEP|C\.?A\.?E\.?\b|'
+        r'Son\s+pesos|BONIF|CHEQUES|CONDICI[OÓ]N\s+DE\s+VENTA|VENCIM)',
+        re.IGNORECASE
+    )
+
+    # Token que parece un SKU (alfanumérico, puede tener guión/punto/barra)
+    SKU_RE = re.compile(r'^[A-Z0-9][A-Z0-9\-./]{0,29}$', re.IGNORECASE)
+
+    # Palabras del lenguaje cotidiano que no son SKUs
+    STOPWORDS = re.compile(
+        r'^(?:DE|EL|LA|LOS|LAS|UN|UNA|Y|O|POR|CON|SIN|PARA|QUE|AL|DEL|EN|A|'
+        r'NO|NI|SU|MAS|MÁS|SI|MI|ME|TE|LE|ES|HA|HI|HO|SE|SER|CON|SUS)$',
+        re.IGNORECASE
+    )
+
+    NUM_RE = re.compile(r'^[\d.,]+$')
+
+    # ── Recorrida de líneas ───────────────────────────────────────────────────
+
+    lines = text.split('\n')
+    items = []
+    in_table = False
+
+    for line in lines:
+        # --- esperar el encabezado ---
+        if not in_table:
+            if HDR.search(line):
+                in_table = True
+            continue
+
+        # --- detectar fin de tabla ---
+        if FOOTER.match(line):
+            break
+
+        stripped = line.strip()
+        if not stripped or len(stripped) < 4:
+            continue
+
+        tokens = stripped.split()
+        if len(tokens) < 2:
+            continue
+
+        # --- separar números del lado derecho (hasta 5) ---
+        tail = []
+        j = len(tokens) - 1
+        while j >= 0 and len(tail) < 5 and NUM_RE.match(tokens[j]):
+            tail.insert(0, tokens[j])
+            j -= 1
+
+        if not tail:
+            continue  # línea sin ningún número → no es ítem
+
+        left = tokens[: j + 1]  # parte izquierda: sku + descripción
+
+        # --- identificar SKU: primer token código-like en "left" ---
+        sku = None
+        desc_start = 0
+
+        for i, tok in enumerate(left):
+            # Saltar número de ítem (1, 2, 3…) al inicio
+            if i == 0 and re.match(r'^\d{1,3}$', tok):
+                continue
+            if SKU_RE.match(tok) and not STOPWORDS.match(tok):
+                sku = tok.upper()
+                desc_start = i + 1
+                break
+
+        if not sku:
+            continue
+
+        descripcion = ' '.join(left[desc_start:]).strip()
+
+        # --- asignar precios (de derecha a izquierda) ---
+        # tail[-1] = subtotal/total (el más grande suele ser el neto)
+        # tail[-2] = precio unitario  (si existe)
+        subtotal    = _parse_num(tail[-1])
+        precio_unit = _parse_num(tail[-2]) if len(tail) >= 2 else 0.0
+
+        # Si solo hay un número, tratar como precio unitario también
+        if precio_unit == 0 and subtotal > 0:
+            precio_unit = subtotal
+
+        # Saltar líneas que solo tienen texto sin valores reales
+        if subtotal == 0 and precio_unit == 0:
+            continue
+
+        # --- cantidad: ¿está en "left" o en "tail"? ---
+        # Si el primer token de "left" era un número lo tomamos como qty
+        qty = 1.0
+        if left and re.match(r'^\d', left[0]) and left[0] != sku:
+            qty = _parse_num(left[0], context='qty')
+
+        items.append({
+            'sku':              sku,
+            'descripcion':      descripcion,
+            'cantidad':         qty,
+            'precio_unit':      precio_unit,
+            'descuento_pct':    0.0,
+            'precio_neto_unit': precio_unit,
+            'iva_pct':          21.0,
+            'subtotal_siva':    subtotal,
+        })
+
+    return items
 
 
 # ── Helper: extracción de tabla pdfplumber ────────────────────────────────────
