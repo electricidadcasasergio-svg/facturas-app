@@ -110,7 +110,10 @@ elif page == "📤 Subir Facturas":
             tmp_path = tmp.name
 
         # Pre-cargar config del proveedor (si ya fue procesado antes)
-        cuit_hint       = extractor.quick_get_cuit(tmp_path)
+        try:
+            cuit_hint = extractor.quick_get_cuit(tmp_path)
+        except AttributeError:
+            cuit_hint = None
         proveedor_config = db.get_proveedor_config(cuit_hint) if cuit_hint else None
 
         with st.spinner(f"Procesando **{f.name}**…"):
