@@ -266,11 +266,11 @@ def get_resumen_proveedor(proveedor_id):
     with get_conn() as conn:
         stats = conn.execute("""
             SELECT
-                COUNT(*)           AS n_facturas,
-                MIN(fecha)         AS primera_iso,
-                MAX(fecha)         AS ultima_iso,
-                SUM(CASE WHEN moneda='ARS' THEN subtotal ELSE 0 END) AS total_ars,
-                SUM(CASE WHEN moneda='USD' THEN total    ELSE 0 END) AS total_usd
+                COUNT(*)                                                        AS n_facturas,
+                MIN(fecha)                                                      AS primera_iso,
+                MAX(fecha)                                                      AS ultima_iso,
+                COALESCE(SUM(CASE WHEN moneda='ARS' THEN subtotal ELSE 0 END), 0) AS total_ars,
+                COALESCE(SUM(CASE WHEN moneda='USD' THEN total    ELSE 0 END), 0) AS total_usd
             FROM facturas
             WHERE proveedor_id = ?
         """, (proveedor_id,)).fetchone()

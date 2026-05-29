@@ -581,8 +581,8 @@ elif page == "🏢 Proveedores":
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Facturas",       stats['n_facturas'])
             c2.metric("SKUs distintos", stats['n_skus'])
-            c3.metric("Total ARS",      f"${stats['total_ars']:,.0f}")
-            if stats['total_usd']:
+            c3.metric("Total ARS",      f"${(stats['total_ars'] or 0):,.0f}")
+            if stats.get('total_usd'):
                 c4.metric("Total USD",  f"U$S {stats['total_usd']:,.2f}")
             c5.metric("Período",
                       f"{stats['primera']} → {stats['ultima']}")
