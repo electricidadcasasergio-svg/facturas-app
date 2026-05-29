@@ -1,100 +1,34 @@
 """
 database.py — capa de datos para facturas-app.
-Usa PostgreSQL (Supabase) tanto en producción como en desarrollo.
+Usa SQLite local (archivo data/facturas.db).
 """
 import os
-import psycopg2
-import psycopg2.extras
+import sqlite3
 from contextlib import contextmanager
+from pathlib import Path
+
+
+# ── Ruta de la base de datos ──────────────────────────────────────────────────
+
+DB_PATH = Path(__file__).parent / 'data' / 'facturas.db'
+DB_PATH.parent.mkdir(exist_ok=True)
 
 
 # ── Conexión ──────────────────────────────────────────────────────────────────
 
-def _get_db_url():
-    """Lee DATABASE_URL desde variable de entorno o Streamlit secrets."""
-    url = os.environ.get('DATABASE_URL', '')
-    if not url:
-        try:
-            import streamlit as st
-            url = st.secrets.get('DATABASE_URL', '')
-        except Exception:
-            pass
-    if not url:
-        raise RuntimeError(
-            "DATABASE_URL no configurada.\n"
-            "Agregá la clave en .streamlit/secrets.toml o como variable de entorno."
-        )
-    # Algunos servicios usan "postgres://" pero psycopg2 requiere "postgresql://"
-    if url.startswith('postgres://'):
-        url = 'postgresql://' + url[len('postgres://'):]
-    return url
-
-
-# ── Adaptadores para que psycopg2 funcione como sqlite3 ──────────────────────
-
-class _Row(dict):
-    """Dict que también soporta indexado entero (como sqlite3.Row)."""
-    def __getitem__(self, key):
-        if isinstance(key, int):
-            return list(self.values())[key]
-        return super().__getitem__(key)
-
-
-class _Cursor:
-    """Wrapper de cursor psycopg2 compatible con la API de sqlite3."""
-    def __init__(self, cur):
-        self._cur = cur
-
-    def fetchone(self):
-        row = self._cur.fetchone()
-        return _Row(row) if row else None
-
-    def fetchall(self):
-        return [_Row(r) for r in self._cur.fetchall()]
-
-    def __iter__(self):
-        for row in self._cur:
-            yield _Row(row)
-
-
-class _Conn:
-    """Wrapper de conexión psycopg2 compatible con la API de sqlite3."""
-    def __init__(self, raw):
-        self._raw = raw
-
-    def execute(self, sql, params=()):
-        sql = sql.replace('?', '%s')
-        cur = self._raw.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(sql, params if params else None)
-        return _Cursor(cur)
-
-    def executemany(self, sql, rows):
-        sql = sql.replace('?', '%s')
-        cur = self._raw.cursor()
-        if rows:
-            psycopg2.extras.execute_batch(cur, sql, rows)
-
-    def executescript(self, script):
-        """Ejecuta múltiples sentencias SQL separadas por ';'."""
-        cur = self._raw.cursor()
-        for stmt in script.split(';'):
-            stmt = stmt.strip()
-            if stmt:
-                cur.execute(stmt)
-
-
 @contextmanager
 def get_conn():
-    raw = psycopg2.connect(_get_db_url())
-    conn = _Conn(raw)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     try:
         yield conn
-        raw.commit()
+        conn.commit()
     except Exception:
-        raw.rollback()
+        conn.rollback()
         raise
     finally:
-        raw.close()
+        conn.close()
 
 
 # ── Creación de tablas ────────────────────────────────────────────────────────
@@ -103,7 +37,7 @@ def init_db():
     with get_conn() as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS proveedores (
-            id              BIGSERIAL PRIMARY KEY,
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
             nombre          TEXT NOT NULL,
             cuit            TEXT UNIQUE,
             moneda_default  TEXT DEFAULT 'ARS',
@@ -111,8 +45,8 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS facturas (
-            id              BIGSERIAL PRIMARY KEY,
-            proveedor_id    BIGINT NOT NULL,
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            proveedor_id    INTEGER NOT NULL,
             numero          TEXT UNIQUE NOT NULL,
             fecha           TEXT NOT NULL,
             subtotal        REAL DEFAULT 0,
@@ -129,8 +63,8 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS items (
-            id               BIGSERIAL PRIMARY KEY,
-            factura_id       BIGINT NOT NULL,
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            factura_id       INTEGER NOT NULL,
             sku              TEXT NOT NULL,
             descripcion      TEXT,
             cantidad         REAL DEFAULT 0,
@@ -146,7 +80,7 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_items_sku      ON items(sku);
         CREATE INDEX IF NOT EXISTS idx_items_factura  ON items(factura_id);
         CREATE INDEX IF NOT EXISTS idx_facturas_fecha ON facturas(fecha);
-        CREATE INDEX IF NOT EXISTS idx_facturas_prov  ON facturas(proveedor_id)
+        CREATE INDEX IF NOT EXISTS idx_facturas_prov  ON facturas(proveedor_id);
         """)
 
 
@@ -193,17 +127,19 @@ def insert_factura(proveedor_id, numero, fecha, subtotal, iva_21, iva_105,
                    percepciones, total, moneda, tipo_cambio, archivo_nombre, cae):
     fecha_iso = _to_iso(fecha)
     with get_conn() as conn:
-        # ON CONFLICT DO NOTHING → devuelve None si ya existe (número duplicado)
-        row = conn.execute("""
-            INSERT INTO facturas
+        conn.execute("""
+            INSERT OR IGNORE INTO facturas
                 (proveedor_id, numero, fecha, subtotal, iva_21, iva_105,
                  percepciones, total, moneda, tipo_cambio, archivo_nombre, cae)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (numero) DO NOTHING
-            RETURNING id
         """, (proveedor_id, numero, fecha_iso, subtotal, iva_21, iva_105,
-              percepciones, total, moneda, tipo_cambio, archivo_nombre, cae)
+              percepciones, total, moneda, tipo_cambio, archivo_nombre, cae))
+        row = conn.execute(
+            "SELECT id FROM facturas WHERE numero = ?", (numero,)
         ).fetchone()
+        # Si changes == 0 significa que ya existía (duplicado)
+        if conn.execute("SELECT changes()").fetchone()[0] == 0:
+            return None
         return row['id'] if row else None
 
 
@@ -350,7 +286,7 @@ def comparar_entre_proveedores(keyword):
                 SUM(i.cantidad)             AS total_unidades,
                 MIN(i.precio_neto_unit)     AS precio_min,
                 MAX(i.precio_neto_unit)     AS precio_max,
-                ROUND(AVG(i.precio_neto_unit)::numeric, 2) AS precio_prom,
+                ROUND(AVG(i.precio_neto_unit), 2) AS precio_prom,
                 MAX(f.fecha)        AS ultima_compra_iso
             FROM items i
             JOIN facturas f ON i.factura_id = f.id
@@ -390,9 +326,8 @@ def comparar_entre_proveedores(keyword):
 
 
 def get_compras_por_mes(proveedor_id=None):
-    # LEFT(fecha, 7) extrae 'YYYY-MM' de la fecha en formato texto 'YYYY-MM-DD'
     q = """
-        SELECT LEFT(fecha, 7) AS mes,
+        SELECT strftime('%Y-%m', fecha) AS mes,
                SUM(CASE WHEN moneda='ARS' THEN subtotal ELSE subtotal * tipo_cambio END) AS total_ars
         FROM facturas
         WHERE 1=1
