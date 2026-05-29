@@ -28,6 +28,10 @@ def _parse_num(s, context='price'):
     if re.search(r'\d\.\d{3},', s):
         return float(s.replace('.', '').replace(',', '.'))
 
+    # Formato americano: coma como miles, punto decimal: 500,118.00 / 2,000.00
+    if re.match(r'^\d{1,3}(,\d{3})+(\.\d+)?$', s):
+        return float(s.replace(',', ''))
+
     # OCR confunde punto con coma en separador de miles: "86,007,37" → "86.007,37"
     if re.match(r'^\d{1,3},\d{3},\d{2}$', s):
         p = s.split(',')
@@ -228,12 +232,26 @@ def _parse_header(text, filename):
             h['proveedor_nombre'] = m.group(1).strip()
 
     if 'proveedor_nombre' not in h:
-        # Estrategia 3: primera línea no vacía que parezca un nombre de empresa
+        # Estrategia 3: "Nombre Apellido C.U.I.T.:" — personas físicas / monotributistas
+        m = re.search(
+            r'^([A-ZÁÉÍÓÚÑ][a-záéíóúñA-ZÁÉÍÓÚÑ\s]{4,50}?)\s+C\.?U\.?I\.?T\.?\s*:',
+            text, re.MULTILINE
+        )
+        if m:
+            candidate = m.group(1).strip()
+            # Descartar si parece un código o dato del comprador
+            if not re.match(r'^(COD|IVA|CUIT|FECHA|Señor|Se\xf1or|DOMICILIO)', candidate, re.IGNORECASE):
+                h['proveedor_nombre'] = candidate
+
+    if 'proveedor_nombre' not in h:
+        # Estrategia 4: primera línea no vacía que parezca un nombre de empresa
         for line in text.split('\n'):
             line = line.strip()
             if (len(line) > 4 and len(line) < 60
                     and re.search(r'[A-ZÁÉÍÓÚÑ]{3}', line)
-                    and not re.match(r'^(FACTURA|REMITO|PRESUPUESTO|Fecha|CUIT|Tel)', line, re.IGNORECASE)):
+                    and not re.match(
+                        r'^(FACTURA|REMITO|PRESUPUESTO|Fecha|CUIT|Tel|COD\.|N[°º]|IVA|INICIO)',
+                        line, re.IGNORECASE)):
                 h['proveedor_nombre'] = line
                 break
 
@@ -252,7 +270,18 @@ def _parse_header(text, filename):
         h['cae'] = m.group(1)
 
     # Totales del pie
-    m = re.search(r'Subtotal[:\s]+([\d.,]+)', text, re.IGNORECASE)
+    # Subtotal: 1) mismo línea con número contiguo
+    m = re.search(r'\bSUBTOTAL\b[^\S\n]+([\d.,]+)', text, re.IGNORECASE)
+    if not m:
+        # 2) línea de totales (contiene GRAVADO/PARCIAL/IMPORTE antes de SUBTOTAL)
+        #    los números están en la línea siguiente
+        m = re.search(
+            r'(?:GRAVADO|PARCIAL|IMPORTE)[^\n]*\bSUBTOTAL\b[^\n]*\n\s*([\d.,]+)',
+            text, re.IGNORECASE
+        )
+    if not m:
+        # 3) "Subtotal: 500.00" con dos puntos o etiqueta explícita
+        m = re.search(r'\bSubtotal\b\s*:\s*([\d.,]+)', text, re.IGNORECASE)
     if m:
         h['subtotal'] = _parse_num(m.group(1))
 
@@ -264,8 +293,8 @@ def _parse_header(text, filename):
     if m:
         h['iva_105'] = _parse_num(m.group(1))
 
-    # Total — buscar el número más grande tras "TOTAL" (ignora mayúsculas, salta USD)
-    totales = re.findall(r'TOTAL[^\d]*([\d.,]+)', text, re.IGNORECASE)
+    # Total — excluir SUBTOTAL (lookbehind); tomar el mayor valor encontrado
+    totales = re.findall(r'(?<![A-Za-z])TOTAL\b[^\d\n]*([\d.,]+)', text, re.IGNORECASE)
     if totales:
         h['total'] = max((_parse_num(t) for t in totales), default=0)
 
@@ -704,54 +733,68 @@ def _items_generic_text(text):
             continue
 
         # --- separar números del lado derecho (hasta 5) ---
+        # Recorremos de derecha a izquierda mientras sean numéricos puros
+        split_pos = len(tokens)
         tail = []
-        j = len(tokens) - 1
-        while j >= 0 and len(tail) < 5 and NUM_RE.match(tokens[j]):
-            tail.insert(0, tokens[j])
-            j -= 1
+        for k in range(len(tokens) - 1, -1, -1):
+            if NUM_RE.match(tokens[k]) and len(tail) < 5:
+                tail.insert(0, tokens[k])
+                split_pos = k
+            else:
+                break
 
         if not tail:
             continue  # línea sin ningún número → no es ítem
 
-        left = tokens[: j + 1]  # parte izquierda: sku + descripción
+        left = tokens[:split_pos]  # parte izquierda: ordinal? + qty? + unidad? + sku + descripción
 
         # --- identificar SKU: primer token código-like en "left" ---
         sku = None
-        desc_start = 0
+        sku_pos = 0
 
         for i, tok in enumerate(left):
-            # Saltar número de ítem (1, 2, 3…) al inicio
-            if i == 0 and re.match(r'^\d{1,3}$', tok):
+            # Saltar número de orden puro al inicio (1, 2, 3 … 99)
+            if i == 0 and re.match(r'^\d{1,2}$', tok):
                 continue
             if SKU_RE.match(tok) and not STOPWORDS.match(tok):
                 sku = tok.upper()
-                desc_start = i + 1
+                sku_pos = i
                 break
 
         if not sku:
             continue
 
-        descripcion = ' '.join(left[desc_start:]).strip()
+        # --- descripción: tokens después del SKU (sin % sueltos de IVA) ---
+        desc_parts = left[sku_pos + 1:]
+        # Quitar tokens del tipo "21.00%" o "10,5%" que son columnas de IVA/descuento
+        desc_parts = [t for t in desc_parts if not re.match(r'^\d+[.,]?\d*\s*%$', t)]
+        descripcion = ' '.join(desc_parts).strip()
 
         # --- asignar precios (de derecha a izquierda) ---
-        # tail[-1] = subtotal/total (el más grande suele ser el neto)
-        # tail[-2] = precio unitario  (si existe)
+        # tail[-1] = subtotal/total  |  tail[-2] = precio unitario (si existe)
         subtotal    = _parse_num(tail[-1])
         precio_unit = _parse_num(tail[-2]) if len(tail) >= 2 else 0.0
 
-        # Si solo hay un número, tratar como precio unitario también
         if precio_unit == 0 and subtotal > 0:
-            precio_unit = subtotal
+            precio_unit = subtotal  # un solo número → usarlo como precio
 
-        # Saltar líneas que solo tienen texto sin valores reales
         if subtotal == 0 and precio_unit == 0:
             continue
 
-        # --- cantidad: ¿está en "left" o en "tail"? ---
-        # Si el primer token de "left" era un número lo tomamos como qty
+        # --- cantidad: buscar en los tokens ANTES del SKU ---
+        # Ej: "1 2,000.00 nº 56KL …" → left[0]='1'(ordinal), left[1]='2,000.00'(qty)
         qty = 1.0
-        if left and re.match(r'^\d', left[0]) and left[0] != sku:
-            qty = _parse_num(left[0], context='qty')
+        pre_sku = left[:sku_pos]
+        nums_pre = [t for t in pre_sku if NUM_RE.match(t)]
+        if nums_pre:
+            if len(nums_pre) == 1:
+                val = nums_pre[0]
+                # Si es un pequeño entero (≤99) probablemente es ordinal → ignorar
+                if not (re.match(r'^\d{1,2}$', val) and int(val) <= 99):
+                    qty = _parse_num(val, context='qty')
+            else:
+                # Primer número = ordinal → el último es la cantidad real
+                qty = _parse_num(nums_pre[-1], context='qty')
 
         items.append({
             'sku':              sku,
