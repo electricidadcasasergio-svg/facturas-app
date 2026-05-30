@@ -20,9 +20,152 @@ st.set_page_config(
 
 db.init_db()
 
+# ── CSS personalizado ─────────────────────────────────────────────────────────
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+
+/* Ocultar header de Streamlit */
+header[data-testid="stHeader"] { display: none !important; }
+
+/* Fondo principal */
+.main .block-container {
+    padding-top: 1.5rem;
+    padding-bottom: 2rem;
+}
+
+/* ── Sidebar oscuro ── */
+section[data-testid="stSidebar"] > div:first-child {
+    background: linear-gradient(170deg, #071e3d 0%, #1558a7 100%);
+}
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] div { color: rgba(255,255,255,0.88) !important; }
+section[data-testid="stSidebar"] .stRadio > div { gap: 4px; }
+section[data-testid="stSidebar"] .stRadio label {
+    background: rgba(255,255,255,0.07);
+    border-radius: 8px;
+    padding: 8px 14px !important;
+    transition: background 0.2s;
+    font-size: 0.95rem !important;
+}
+section[data-testid="stSidebar"] .stRadio label:hover {
+    background: rgba(255,255,255,0.18) !important;
+}
+
+/* ── Tarjetas de métricas ── */
+div[data-testid="metric-container"] {
+    background: #ffffff;
+    border-radius: 14px;
+    padding: 18px 20px !important;
+    box-shadow: 0 4px 18px rgba(21,88,167,0.10);
+    border-top: 4px solid #1558a7;
+}
+div[data-testid="metric-container"] [data-testid="stMetricLabel"] > div {
+    font-size: 0.75rem !important;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: #7a93b4 !important;
+}
+div[data-testid="metric-container"] [data-testid="stMetricValue"] {
+    font-size: 1.65rem !important;
+    font-weight: 700;
+    color: #071e3d !important;
+}
+
+/* ── Expanders ── */
+div[data-testid="stExpander"] {
+    border: 1px solid #d8e5f5 !important;
+    border-radius: 12px !important;
+    box-shadow: 0 2px 8px rgba(21,88,167,0.06);
+    background: #ffffff;
+}
+div[data-testid="stExpander"] summary {
+    font-weight: 600;
+}
+
+/* ── Botones ── */
+div.stButton > button {
+    border-radius: 9px !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.3px;
+    transition: all 0.2s !important;
+}
+div.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #1558a7, #071e3d) !important;
+    border: none !important;
+    box-shadow: 0 4px 14px rgba(21,88,167,0.35) !important;
+}
+div.stButton > button[kind="primary"]:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 6px 20px rgba(21,88,167,0.45) !important;
+}
+div.stButton > button:not([kind="primary"]):hover {
+    border-color: #1558a7 !important;
+    color: #1558a7 !important;
+}
+
+/* ── Tablas / Data editor ── */
+div[data-testid="stDataFrame"], div[data-testid="data_editor"] {
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.06);
+}
+
+/* ── Alertas ── */
+div[data-testid="stAlert"] { border-radius: 10px !important; }
+
+/* ── Divisor ── */
+hr { border-color: #d8e5f5 !important; margin: 1.5rem 0 !important; }
+
+/* ── Selectbox / inputs ── */
+div[data-baseweb="select"] > div,
+div[data-baseweb="input"] > div {
+    border-radius: 8px !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ── Helper: encabezado de página ──────────────────────────────────────────────
+
+def _page_header(icon: str, title: str, subtitle: str = ""):
+    sub_html = (
+        f'<p style="color:rgba(255,255,255,0.75);margin:6px 0 0;font-size:0.9rem;">{subtitle}</p>'
+        if subtitle else ""
+    )
+    st.markdown(f"""
+    <div style="
+        background: linear-gradient(135deg, #1558a7 0%, #071e3d 100%);
+        border-radius: 16px;
+        padding: 22px 28px;
+        margin-bottom: 22px;
+        box-shadow: 0 8px 28px rgba(21,88,167,0.22);
+    ">
+        <h1 style="color:white;margin:0;font-size:1.7rem;font-weight:700;">
+            {icon}&nbsp; {title}
+        </h1>
+        {sub_html}
+    </div>
+    """, unsafe_allow_html=True)
+
+
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 
-st.sidebar.title("⚡ Casa Sergio")
+st.sidebar.markdown("""
+<div style="text-align:center; padding:12px 0 24px;">
+    <div style="font-size:2.8rem; line-height:1;">⚡</div>
+    <div style="font-size:1.15rem; font-weight:700; color:white; margin-top:6px;">Casa Sergio</div>
+    <div style="font-size:0.72rem; color:rgba(255,255,255,0.55); letter-spacing:1px;
+                text-transform:uppercase; margin-top:2px;">Gestión de Facturas</div>
+</div>
+""", unsafe_allow_html=True)
+
 page = st.sidebar.radio(
     "Navegación",
     ["🏠 Inicio", "📤 Subir Facturas", "📄 Facturas", "🔍 SKUs", "⚖️ Comparar", "🏢 Proveedores"],
@@ -34,7 +177,7 @@ page = st.sidebar.radio(
 # 🏠  INICIO
 # ─────────────────────────────────────────────────────────────────────────────
 if page == "🏠 Inicio":
-    st.title("Casa Sergio — Gestión de Facturas")
+    _page_header("🏠", "Casa Sergio", "Panel de control de compras y facturas")
 
     with db.get_conn() as conn:
         n_fact  = conn.execute("SELECT COUNT(*) FROM facturas").fetchone()[0]
@@ -45,10 +188,10 @@ if page == "🏠 Inicio":
         ).fetchone()[0]
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Facturas cargadas", f"{n_fact:,}")
-    c2.metric("Proveedores",       f"{n_prov:,}")
-    c3.metric("SKUs distintos",    f"{n_skus:,}")
-    c4.metric("Compras netas ARS", f"${tot_ars:,.0f}")
+    c1.metric("🧾 Facturas cargadas", f"{n_fact:,}")
+    c2.metric("🏢 Proveedores",        f"{n_prov:,}")
+    c3.metric("🔖 SKUs distintos",     f"{n_skus:,}")
+    c4.metric("💰 Compras netas ARS",  f"${tot_ars:,.0f}")
 
     if n_fact == 0:
         st.info("Todavía no hay facturas. Usá **📤 Subir Facturas** para empezar.")
@@ -87,8 +230,7 @@ if page == "🏠 Inicio":
 # 📤  SUBIR FACTURAS
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "📤 Subir Facturas":
-    st.title("Subir Facturas")
-    st.caption("Podés subir PDFs o fotos (JPG/PNG) de facturas. Se previsualizan antes de guardar.")
+    _page_header("📤", "Subir Facturas", "PDFs o fotos JPG/PNG — se previsualizan antes de guardar")
 
     uploaded = st.file_uploader(
         "Arrastrá los archivos acá (PDF, JPG, PNG)",
@@ -283,7 +425,7 @@ elif page == "📤 Subir Facturas":
 # 📄  FACTURAS
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "📄 Facturas":
-    st.title("Facturas")
+    _page_header("📄", "Facturas", "Historial de facturas cargadas")
 
     proveedores = db.get_proveedores()
     prov_map    = {"Todos": None} | {p['nombre']: p['id'] for p in proveedores}
@@ -357,7 +499,7 @@ elif page == "📄 Facturas":
 # 🔍  SKUs
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "🔍 SKUs":
-    st.title("SKUs")
+    _page_header("🔍", "SKUs", "Búsqueda de códigos y evolución de precios")
 
     proveedores = db.get_proveedores()
     prov_map    = {"Todos": None} | {p['nombre']: p['id'] for p in proveedores}
@@ -456,11 +598,7 @@ elif page == "🔍 SKUs":
 # ⚖️  COMPARAR ENTRE PROVEEDORES
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "⚖️ Comparar":
-    st.title("⚖️ Comparar entre proveedores")
-    st.caption(
-        "Buscá un producto por descripción y compará precios entre todos "
-        "los proveedores que lo tienen."
-    )
+    _page_header("⚖️", "Comparar proveedores", "Compará precios del mismo producto entre distintos proveedores")
 
     keyword = st.text_input(
         "Descripción del producto",
@@ -564,7 +702,7 @@ elif page == "⚖️ Comparar":
 # 🏢  PROVEEDORES
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "🏢 Proveedores":
-    st.title("Proveedores")
+    _page_header("🏢", "Proveedores", "Resumen de actividad por proveedor")
 
     proveedores = db.get_proveedores()
     if not proveedores:
