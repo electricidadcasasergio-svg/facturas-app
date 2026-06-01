@@ -168,7 +168,7 @@ st.sidebar.markdown("""
 
 page = st.sidebar.radio(
     "Navegación",
-    ["🏠 Inicio", "📤 Subir Facturas", "📄 Facturas", "🔍 SKUs", "⚖️ Comparar", "🏢 Proveedores"],
+    ["🏠 Inicio", "📤 Subir Facturas", "📄 Facturas", "📊 Cta. Cte.", "🔍 SKUs", "⚖️ Comparar", "🏢 Proveedores"],
     label_visibility="collapsed",
 )
 
@@ -559,6 +559,128 @@ elif page == "📄 Facturas":
             else:
                 db.delete_factura(fac_id_del)
                 st.success("✅ Factura eliminada correctamente.")
+                st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📊  CUENTA CORRIENTE
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "📊 Cta. Cte.":
+    _page_header("📊", "Cuenta Corriente", "Saldo y movimientos por proveedor")
+
+    proveedores = db.get_proveedores()
+    if not proveedores:
+        st.info("No hay proveedores cargados aún.")
+        st.stop()
+
+    # ── Resumen general ──────────────────────────────────────────────────────
+    saldos = db.get_saldos_proveedores()
+    df_sal = pd.DataFrame(saldos)
+
+    st.markdown("#### Resumen de saldos")
+
+    # Métricas globales
+    total_deuda = df_sal['saldo'].clip(lower=0).sum()
+    total_fact  = df_sal['total_facturas'].sum()
+    total_pago  = df_sal['total_pagos'].sum()
+    m1, m2, m3 = st.columns(3)
+    m1.metric("📋 Total facturado ARS", f"${total_fact:,.0f}")
+    m2.metric("💳 Total pagado ARS",    f"${total_pago:,.0f}")
+    m3.metric("💸 Deuda total ARS",     f"${total_deuda:,.0f}")
+
+    # Tabla resumen con color por saldo
+    def _color_saldo(val):
+        if val > 0:
+            return 'color: #c0392b; font-weight:600'
+        elif val == 0:
+            return 'color: #27ae60; font-weight:600'
+        return 'color: #2980b9; font-weight:600'
+
+    df_show = df_sal[['nombre', 'total_facturas', 'total_pagos', 'saldo']].copy()
+    df_show.columns = ['Proveedor', 'Facturado ARS', 'Pagado ARS', 'Saldo ARS']
+    st.dataframe(
+        df_show.style.applymap(_color_saldo, subset=['Saldo ARS']),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            'Facturado ARS': st.column_config.NumberColumn(format="$%.2f"),
+            'Pagado ARS':    st.column_config.NumberColumn(format="$%.2f"),
+            'Saldo ARS':     st.column_config.NumberColumn(format="$%.2f"),
+        }
+    )
+    st.caption("🔴 Saldo positivo = deuda pendiente   |   🟢 Saldo cero = al día   |   🔵 Saldo negativo = saldo a favor")
+
+    st.divider()
+
+    # ── Detalle por proveedor ────────────────────────────────────────────────
+    st.markdown("#### Movimientos por proveedor")
+    prov_map_cc = {p['nombre']: p['id'] for p in proveedores}
+    prov_sel_cc = st.selectbox("Proveedor", list(prov_map_cc.keys()), key="cc_prov")
+    prov_id_cc  = prov_map_cc[prov_sel_cc]
+
+    movs, saldo_actual = db.get_cuenta_corriente(prov_id_cc)
+
+    # Métricas del proveedor
+    ca1, ca2, ca3 = st.columns(3)
+    total_f_prov = sum(m['debe']  for m in movs)
+    total_p_prov = sum(m['haber'] for m in movs)
+    color_saldo  = "#c0392b" if saldo_actual > 0 else "#27ae60"
+    ca1.metric("Facturado", f"${total_f_prov:,.0f}")
+    ca2.metric("Pagado",    f"${total_p_prov:,.0f}")
+    ca3.metric("Saldo actual", f"${saldo_actual:,.0f}")
+
+    if movs:
+        df_movs = pd.DataFrame(movs)
+        df_movs['tipo_icon'] = df_movs['tipo'].map({'FACTURA': '🧾 Factura', 'PAGO': '💳 Pago'})
+        st.dataframe(
+            df_movs[['fecha_display', 'tipo_icon', 'descripcion', 'debe', 'haber', 'saldo']],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                'fecha_display': 'Fecha',
+                'tipo_icon':     st.column_config.TextColumn('Tipo',        width='small'),
+                'descripcion':   'Descripción',
+                'debe':  st.column_config.NumberColumn('Debe  (ARS)',  format="$%.2f"),
+                'haber': st.column_config.NumberColumn('Haber (ARS)',  format="$%.2f"),
+                'saldo': st.column_config.NumberColumn('Saldo (ARS)',  format="$%.2f"),
+            }
+        )
+    else:
+        st.info("No hay movimientos para este proveedor.")
+
+    # ── Registrar pago ───────────────────────────────────────────────────────
+    st.divider()
+    with st.expander("💳 Registrar pago a este proveedor"):
+        cp1, cp2, cp3 = st.columns([2, 1, 2])
+        monto_pago = cp1.number_input("Monto (ARS)", min_value=0.0, step=1000.0, key="cc_monto")
+        fecha_pago_cc = cp2.date_input("Fecha", value=date.today(), key="cc_fecha")
+        desc_pago  = cp3.text_input("Descripción (opcional)", placeholder="ej: Transferencia banco", key="cc_desc")
+
+        if st.button("💳 Registrar pago", type="primary", key="cc_btn_pago"):
+            if monto_pago <= 0:
+                st.error("El monto debe ser mayor a cero.")
+            else:
+                db.insert_pago(
+                    prov_id_cc,
+                    monto_pago,
+                    fecha_pago_cc.strftime('%d/%m/%Y'),
+                    desc_pago or 'Pago'
+                )
+                st.success(f"✅ Pago de **${monto_pago:,.0f}** registrado para {prov_sel_cc}.")
+                st.rerun()
+
+    # ── Eliminar un pago ─────────────────────────────────────────────────────
+    pagos_prov = [m for m in movs if m['tipo'] == 'PAGO']
+    if pagos_prov:
+        with st.expander("🗑️ Eliminar un pago registrado"):
+            opc_pagos = {
+                f"{m['fecha_display']}  —  {m['descripcion']}  —  ${m['haber']:,.0f}": m['ref_id']
+                for m in pagos_prov
+            }
+            sel_del_pago = st.selectbox("Pago a eliminar", list(opc_pagos.keys()), key="cc_del_pago")
+            if st.button("🗑️ Eliminar pago", key="cc_btn_del_pago"):
+                db.delete_pago(opc_pagos[sel_del_pago])
+                st.success("Pago eliminado.")
                 st.rerun()
 
 

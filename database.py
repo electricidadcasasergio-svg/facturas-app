@@ -102,6 +102,18 @@ def init_db():
             config_json TEXT NOT NULL,
             updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS pagos (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            proveedor_id INTEGER NOT NULL,
+            monto        REAL NOT NULL,
+            fecha        TEXT NOT NULL,
+            descripcion  TEXT,
+            created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (proveedor_id) REFERENCES proveedores(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pagos_prov ON pagos(proveedor_id);
         """)
     _migrate()
 
@@ -208,6 +220,80 @@ def marcar_impaga(factura_id):
             "UPDATE facturas SET pagada=0, fecha_pago=NULL WHERE id=?",
             (factura_id,)
         )
+
+
+def insert_pago(proveedor_id, monto, fecha, descripcion=''):
+    """Registra un pago a un proveedor."""
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO pagos (proveedor_id, monto, fecha, descripcion)
+            VALUES (?, ?, ?, ?)
+        """, (proveedor_id, monto, _to_iso(fecha), descripcion))
+
+
+def delete_pago(pago_id):
+    """Elimina un pago registrado."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM pagos WHERE id = ?", (pago_id,))
+
+
+def get_cuenta_corriente(proveedor_id):
+    """
+    Devuelve (movimientos, saldo_actual) para un proveedor.
+    Movimientos ordenados por fecha: facturas (debe) + pagos (haber).
+    """
+    with get_conn() as conn:
+        facturas = conn.execute("""
+            SELECT fecha, 'FACTURA' AS tipo,
+                   'Factura ' || numero AS descripcion,
+                   total AS debe, 0.0 AS haber, id AS ref_id
+            FROM facturas WHERE proveedor_id = ?
+        """, (proveedor_id,)).fetchall()
+
+        pagos = conn.execute("""
+            SELECT fecha, 'PAGO' AS tipo,
+                   COALESCE(descripcion, 'Pago') AS descripcion,
+                   0.0 AS debe, monto AS haber, id AS ref_id
+            FROM pagos WHERE proveedor_id = ?
+        """, (proveedor_id,)).fetchall()
+
+    movs = [dict(r) for r in facturas] + [dict(r) for r in pagos]
+    movs.sort(key=lambda x: x['fecha'] or '')
+
+    saldo = 0.0
+    for m in movs:
+        saldo += m['debe'] - m['haber']
+        m['saldo']         = saldo
+        m['fecha_display'] = _to_display(m['fecha'])
+
+    return movs, saldo
+
+
+def get_saldos_proveedores():
+    """
+    Devuelve saldo (deuda) por proveedor:
+    saldo = total facturas ARS - total pagos
+    """
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT p.id, p.nombre, p.cuit,
+                   COALESCE(f.total_fact, 0)  AS total_facturas,
+                   COALESCE(pg.total_pago, 0) AS total_pagos,
+                   COALESCE(f.total_fact, 0) - COALESCE(pg.total_pago, 0) AS saldo
+            FROM proveedores p
+            LEFT JOIN (
+                SELECT proveedor_id, SUM(total) AS total_fact
+                FROM facturas WHERE moneda = 'ARS'
+                GROUP BY proveedor_id
+            ) f  ON f.proveedor_id  = p.id
+            LEFT JOIN (
+                SELECT proveedor_id, SUM(monto) AS total_pago
+                FROM pagos
+                GROUP BY proveedor_id
+            ) pg ON pg.proveedor_id = p.id
+            ORDER BY saldo DESC
+        """).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_resumen_pagos():
