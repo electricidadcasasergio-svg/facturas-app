@@ -282,10 +282,23 @@ def _parse_header(text, filename):
             h['proveedor_nombre'] = m.group(1).strip()
 
     if 'proveedor_nombre' not in h:
-        # Estrategia 2: línea que termina en S.A. / S.R.L. / SRL / etc.
+        # Estrategia 2: línea que termina exactamente en S.A. / S.R.L. / etc.
         m = re.search(
             r'^([A-ZÁÉÍÓÚÑ][^\n]{2,50}?\s+'
             r'(?:S\.A\.S?|S\.R\.L\.|SRL|S\.A\.|SA|LTDA|S\.C\.S?|E\.V\.I\.C\.S\.A\.)\.?)\s*$',
+            sup_text, re.MULTILINE | re.IGNORECASE
+        )
+        if m:
+            h['proveedor_nombre'] = m.group(1).strip()
+
+    if 'proveedor_nombre' not in h:
+        # Estrategia 2b: S.A./SA/SRL al inicio de línea, puede continuar con más datos
+        # Ej: "Melectric S.A. Fecha: ..."  →  captura "Melectric S.A."
+        # Ej: "Distribuidora Interelec SA C.U.I.T.: ..."  →  captura "Distribuidora Interelec SA"
+        m = re.search(
+            r'^([A-ZÁÉÍÓÚÑ][^\n]{2,45}\s+'
+            r'(?:S\.A\.S?|S\.R\.L\.|SRL|S\.A\.|SA|LTDA)\.?)'
+            r'(?:\s+[A-ZÁÉÍÓÚÑ]|\s*$)',
             sup_text, re.MULTILINE | re.IGNORECASE
         )
         if m:
@@ -307,23 +320,40 @@ def _parse_header(text, filename):
         _EXCL = re.compile(
             r'^(FACTURA|REMITO|PRESUPUESTO|NOTA|RECIBO|Fecha|CUIT|Tel|'
             r'COD\.|N[°º]|IVA|INICIO|ORIGINAL|DUPLICADO|TIPO|PUNTO|'
-            r'Se[ñn]or|Sr\.|Cliente|Comprador|Direcci[oó]n|Localidad|A\s*:)',
+            r'Se[ñn]or|Sr\.|Cliente|Comprador|Direcci[oó]n|Localidad|A\s*:|'
+            r'Responsable|Ing\.|Inic\.|Moneda|Av\.|Calle)',
             re.IGNORECASE
         )
         for line in sup_text.split('\n'):
             line = line.strip()
-            if (5 < len(line) < 70
-                    and re.search(r'[A-ZÁÉÍÓÚÑ]{3}', line)
-                    and not _EXCL.match(line)
-                    and not re.match(r'^[\d\W]+$', line)):   # descartar líneas solo numéricas
-                h['proveedor_nombre'] = line
+            # Limpiar info extra appended (Fecha:, C.U.I.T.:, etc.) de la misma línea
+            clean = re.split(r'\s+(?:Fecha|C\.?U\.?I\.?T|Tel|Inic|Ing\.)\s*[.:]', line, flags=re.IGNORECASE)[0].strip()
+            if (5 < len(clean) < 70
+                    and re.search(r'[A-Za-z]{3,}', clean)       # al menos 3 letras seguidas
+                    and re.match(r'^[A-ZÁÉÍÓÚÑ]', clean)        # empieza con mayúscula
+                    and not _EXCL.match(clean)
+                    and not re.match(r'^[\d\W]+$', clean)):
+                h['proveedor_nombre'] = clean
                 break
 
     # Moneda y tipo de cambio
-    if re.search(r'\bUSD\b', text):
+    is_usd = (re.search(r'\bUSD\b', text) or
+              re.search(r'D[oó]lar\s+Billete|Moneda[:\s]+D[oó]lar', text, re.IGNORECASE))
+    if is_usd:
         h['moneda'] = 'USD'
-        m = re.search(r'USD\s*1\s*=\s*\$\s*([\d.,]+)', text)
-        h['tipo_cambio'] = _parse_num(m.group(1)) if m else 1.0
+        # Intentar extraer TC de varias fórmulas
+        for tc_pat in [
+            r'USD\s*1\s*=\s*\$\s*([\d.,]+)',                           # USD 1 = $1430
+            r'TC\s+aplicado[^\d$]*\$?\s*([\d.,]+)',                     # TC aplicado... $1430
+            r'tipo\s+de\s+cambio[^\d$]*:?\s*([\d.,]+)',                 # tipo de cambio: 1430
+            r'\$\s*([\d.,]+)\s+por\s+(?:cada\s+)?d[oó]lar',            # $1430 por dólar
+        ]:
+            m = re.search(tc_pat, text, re.IGNORECASE)
+            if m:
+                h['tipo_cambio'] = _parse_num(m.group(1))
+                break
+        else:
+            h['tipo_cambio'] = 1.0
     else:
         h['moneda'] = 'ARS'
         h['tipo_cambio'] = 1.0
@@ -348,17 +378,34 @@ def _parse_header(text, filename):
         m = re.search(r'\bSubtotal\b\s*:\s*([\d.,]+)', text, re.IGNORECASE)
     if m:
         h['subtotal'] = _parse_num(m.group(1))
+    if not h.get('subtotal'):
+        # "Neto Gravado: $ 1,804.44" (Melectric y similares)
+        m = re.search(r'Neto\s+Gravado\s*:\s*\$?\s*([\d.,]+)', text, re.IGNORECASE)
+        if m:
+            h['subtotal'] = _parse_num(m.group(1))
+    if not h.get('subtotal'):
+        # "BRUTO $1,816,100.00" (Interelec y similares)
+        m = re.search(r'\bBRUTO\b[^\d$\n]*\$?\s*([\d.,]+)', text, re.IGNORECASE)
+        if m:
+            h['subtotal'] = _parse_num(m.group(1))
 
-    m = re.search(r'IVA\s*21[%,°]?\s*([\d.,]+)', text, re.IGNORECASE)
+    # IVA 21% — tolerar ":" y "$" entre etiqueta y número
+    m = re.search(r'IVA\s*21[%,°]?\s*[:\$]?\s*([\d.,]+)', text, re.IGNORECASE)
     if m:
         h['iva_21'] = _parse_num(m.group(1))
 
-    m = re.search(r'IVA\s*10[,.]?5[%,°]?\s*([\d.,]+)', text, re.IGNORECASE)
+    # IVA 10.5% — tolerar ":" y "$"
+    m = re.search(r'IVA\s*10[,.]?5[%,°]?\s*[:\$]?\s*([\d.,]+)', text, re.IGNORECASE)
     if m:
         h['iva_105'] = _parse_num(m.group(1))
 
+    # Percepciones — "Percepción IIBB: 90.22"
+    m = re.search(r'Percepc?i[oó]n\b[^\n\d]+([\d.,]+)', text, re.IGNORECASE)
+    if m:
+        h['percepciones'] = _parse_num(m.group(1))
+
     # Total — excluir SUBTOTAL (lookbehind); tomar el mayor valor encontrado
-    totales = re.findall(r'(?<![A-Za-z])TOTAL\b[^\d\n]*([\d.,]+)', text, re.IGNORECASE)
+    totales = re.findall(r'(?<![A-Za-z])TOTAL\b[^\d\n$]*\$?\s*([\d.,]+)', text, re.IGNORECASE)
     if totales:
         h['total'] = max((_parse_num(t) for t in totales), default=0)
 
@@ -813,13 +860,31 @@ def _items_generic_text(text, header_hint=None, discovered=None):
         if len(tokens) < 2:
             continue
 
-        # Separar números del lado derecho (hasta 5)
+        # Fusionar "21.00 %" → "21.00%" para que el scan de tail los ignore
+        merged = []
+        ti = 0
+        while ti < len(tokens):
+            if (ti + 1 < len(tokens) and tokens[ti + 1] == '%'
+                    and NUM_RE.match(tokens[ti])):
+                merged.append(tokens[ti] + '%')
+                ti += 2
+            else:
+                merged.append(tokens[ti])
+                ti += 1
+        tokens = merged
+
+        # Separar números del lado derecho (hasta 5), saltando tokens de IVA/descuento "%"
         split_pos = len(tokens)
         tail = []
-        for k in range(len(tokens) - 1, -1, -1):
-            if NUM_RE.match(tokens[k]) and len(tail) < 5:
+        k = len(tokens) - 1
+        while k >= 0 and len(tail) < 5:
+            if NUM_RE.match(tokens[k]):
                 tail.insert(0, tokens[k])
                 split_pos = k
+                k -= 1
+            elif re.match(r'^\d+[.,]?\d*%$', tokens[k]):
+                split_pos = k   # también excluir de left
+                k -= 1          # pero no agregar a tail
             else:
                 break
 
@@ -829,12 +894,15 @@ def _items_generic_text(text, header_hint=None, discovered=None):
         left = tokens[:split_pos]
 
         # Identificar SKU: primer token código-like
+        # Los números puros cortos (< 4 dígitos) son cantidades, no SKUs
         sku     = None
         sku_pos = 0
         for i, tok in enumerate(left):
             if i == 0 and re.match(r'^\d{1,2}$', tok):
                 continue   # saltar ordinal de ítem
             if SKU_RE.match(tok) and not STOPWORDS.match(tok):
+                if re.match(r'^\d+$', tok) and len(tok) < 4:
+                    continue   # número corto → probable cantidad, no SKU
                 sku     = tok.upper()
                 sku_pos = i
                 break
