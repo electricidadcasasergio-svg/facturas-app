@@ -192,6 +192,37 @@ def _parse_full(text, filename, tables=None, config=None):
 def _parse_header(text, filename):
     h = {'archivo_nombre': filename}
 
+    # ── Separar la sección del PROVEEDOR de la del COMPRADOR ─────────────────
+    # En una factura argentina el vendedor va PRIMERO y luego los datos del
+    # cliente aparecen tras líneas como "Señor(es):", "Cliente:", "Sr.(es):", etc.
+    # Solo buscamos nombre y CUIT del proveedor ANTES de esa línea divisoria.
+    _BUYER_RE = re.compile(
+        r'^(?:'
+        r'Se[ñn]ore?s?\s*[:(]|'          # Señor(es): / Señores:
+        r'Sr\.\s*\(?es\)?[\s:]|'           # Sr.(es): / Sr.:
+        r'A\s*:|'                           # A:
+        r'Cliente\s*[:\d(]|'               # Cliente: / Cliente 16987
+        r'Comprador\s*:|'
+        r'Receptor\s*:|'
+        r'DATOS\s+DEL\s+(?:RECEPTOR|CLIENTE)|'
+        r'Nombre\s+del\s+[Cc]liente'
+        r')',
+        re.MULTILINE | re.IGNORECASE
+    )
+    buyer_m  = _BUYER_RE.search(text)
+    sup_text = text[:buyer_m.start()] if buyer_m else text
+    # Si la sección del proveedor quedó muy corta, usamos todo el texto como fallback
+    if len(sup_text.strip()) < 40:
+        sup_text = text
+
+    # Palabras que indican que una línea pertenece al comprador, no al proveedor
+    _BUYER_LINE = re.compile(
+        r'^(?:Se[ñn]or|Sr\.|Cliente|Comprador|Receptor|Direcci[oó]n|'
+        r'Localidad|Condici[oó]n|Domicilio|IVA\s*:|CUIT\s*N[°º]|'
+        r'Cod\.?\s*Cliente|C\.P\.|Tel[eé]fono)',
+        re.IGNORECASE
+    )
+
     # Número de factura — varios formatos posibles
     for pat in [
         r'N[°º]?\s*:?\s*([A-Z]-\d{5}-\d{8})',          # A-00005-00235741
@@ -206,38 +237,38 @@ def _parse_header(text, filename):
             h['numero'] = m.group(1).strip()
             break
 
-    # Fecha (DD/MM/YYYY)
+    # Fecha (DD/MM/YYYY) — buscar en todo el texto
     for pat in [
         r'(?:Fecha[^\n:]*:|FECHA:)\s*(\d{2}/\d{2}/\d{4})',
         r'(?:Fecha\s+emisi[oó]n:?\s*)(\d{2}/\d{2}/\d{4})',
         r'\bFecha:\s*(\d{2}/\d{2}/\d{4})',
-        r'\b(\d{2}/\d{2}/\d{4})\b',          # fallback: primera fecha que aparezca
+        r'\b(\d{2}/\d{2}/\d{4})\b',
     ]:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
             h['fecha'] = m.group(1)
             break
 
-    # CUITs — el primero suele ser el proveedor
-    cuits = re.findall(r'(\d{2}-\d{8}-\d)', text)
+    # CUITs — usar primero la sección del proveedor para evitar tomar el CUIT del comprador
+    cuits = re.findall(r'(\d{2}-\d{8}-\d)', sup_text)
     if not cuits:
-        # Fallback OCR: buscar 11 dígitos seguidos (CUIT sin guiones)
-        raw = re.findall(r'\b(\d{11})\b', text)
+        cuits = re.findall(r'(\d{2}-\d{8}-\d)', text)
+    if not cuits:
+        raw = re.findall(r'\b(\d{11})\b', sup_text)
         if raw:
             c = raw[0]
             cuits = [f'{c[:2]}-{c[2:10]}-{c[10]}']
     if cuits:
         h['proveedor_cuit'] = cuits[0]
 
-    # Razón social del proveedor (si no lo detecta el parser específico)
-    # Intenta varias estrategias en orden de confianza
+    # Razón social del proveedor — varios intentos en orden de confianza
     _nombres_por_cuit = {
         '30-66180083-2': 'BAW ELECTRIC S.A.',
         '30-67854721-9': 'GEN ROD S.A.',
         '30-71178446-9': 'CORESA GROUP S.R.L.',
         '30-65233757-7': 'ACROPOLIS CABLES S.A. (KALOP)',
         '20-14772827-2': 'PRIOLO DANIEL ROBERTO',
-        '20147728272':   'PRIOLO DANIEL ROBERTO',   # sin guiones (OCR)
+        '20147728272':   'PRIOLO DANIEL ROBERTO',
     }
     for cuit_known, nombre_known in _nombres_por_cuit.items():
         if cuit_known in text:
@@ -245,41 +276,46 @@ def _parse_header(text, filename):
             break
 
     if 'proveedor_nombre' not in h:
-        # Estrategia 1: "Razón Social: NOMBRE"
-        m = re.search(r'Raz[oó]n\s+Social[^\n:]*:\s*([^\n]{3,60})', text, re.IGNORECASE)
+        # Estrategia 1: etiqueta explícita "Razón Social:"
+        m = re.search(r'Raz[oó]n\s+Social[^\n:]*:\s*([^\n]{3,60})', sup_text, re.IGNORECASE)
         if m:
             h['proveedor_nombre'] = m.group(1).strip()
 
     if 'proveedor_nombre' not in h:
-        # Estrategia 2: línea que termina en S.A. / S.R.L. / S.A.S. / SRL / SA
+        # Estrategia 2: línea que termina en S.A. / S.R.L. / SRL / etc.
         m = re.search(
-            r'^([A-ZÁÉÍÓÚÑ][^\n]{2,50}?\s+(?:S\.A\.S?|S\.R\.L\.|SRL|S\.A\.|SA|LTDA|S\.C\.S?|E\.V\.I\.C\.S\.A\.)\.?)\s*$',
-            text, re.MULTILINE | re.IGNORECASE
+            r'^([A-ZÁÉÍÓÚÑ][^\n]{2,50}?\s+'
+            r'(?:S\.A\.S?|S\.R\.L\.|SRL|S\.A\.|SA|LTDA|S\.C\.S?|E\.V\.I\.C\.S\.A\.)\.?)\s*$',
+            sup_text, re.MULTILINE | re.IGNORECASE
         )
         if m:
             h['proveedor_nombre'] = m.group(1).strip()
 
     if 'proveedor_nombre' not in h:
-        # Estrategia 3: "Nombre Apellido C.U.I.T.:" — personas físicas / monotributistas
+        # Estrategia 3: "Nombre Apellido C.U.I.T.:" — persona física / monotributista
         m = re.search(
             r'^([A-ZÁÉÍÓÚÑ][a-záéíóúñA-ZÁÉÍÓÚÑ\s]{4,50}?)\s+C\.?U\.?I\.?T\.?\s*:',
-            text, re.MULTILINE
+            sup_text, re.MULTILINE
         )
         if m:
             candidate = m.group(1).strip()
-            # Descartar si parece un código o dato del comprador
-            if not re.match(r'^(COD|IVA|CUIT|FECHA|Señor|Se\xf1or|DOMICILIO)', candidate, re.IGNORECASE):
+            if not _BUYER_LINE.match(candidate):
                 h['proveedor_nombre'] = candidate
 
     if 'proveedor_nombre' not in h:
-        # Estrategia 4: primera línea no vacía que parezca un nombre de empresa
-        for line in text.split('\n'):
+        # Estrategia 4: primera línea con aspecto de nombre en la sección del proveedor
+        _EXCL = re.compile(
+            r'^(FACTURA|REMITO|PRESUPUESTO|NOTA|RECIBO|Fecha|CUIT|Tel|'
+            r'COD\.|N[°º]|IVA|INICIO|ORIGINAL|DUPLICADO|TIPO|PUNTO|'
+            r'Se[ñn]or|Sr\.|Cliente|Comprador|Direcci[oó]n|Localidad|A\s*:)',
+            re.IGNORECASE
+        )
+        for line in sup_text.split('\n'):
             line = line.strip()
-            if (len(line) > 4 and len(line) < 60
+            if (5 < len(line) < 70
                     and re.search(r'[A-ZÁÉÍÓÚÑ]{3}', line)
-                    and not re.match(
-                        r'^(FACTURA|REMITO|PRESUPUESTO|Fecha|CUIT|Tel|COD\.|N[°º]|IVA|INICIO)',
-                        line, re.IGNORECASE)):
+                    and not _EXCL.match(line)
+                    and not re.match(r'^[\d\W]+$', line)):   # descartar líneas solo numéricas
                 h['proveedor_nombre'] = line
                 break
 
