@@ -187,11 +187,23 @@ if page == "🏠 Inicio":
             "SELECT COALESCE(SUM(subtotal),0) FROM facturas WHERE moneda='ARS'"
         ).fetchone()[0]
 
+    pagos = db.get_resumen_pagos()
+
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("🧾 Facturas cargadas", f"{n_fact:,}")
     c2.metric("🏢 Proveedores",        f"{n_prov:,}")
     c3.metric("🔖 SKUs distintos",     f"{n_skus:,}")
     c4.metric("💰 Compras netas ARS",  f"${tot_ars:,.0f}")
+
+    # Resumen de pagos
+    if n_fact > 0:
+        st.markdown("---")
+        cp1, cp2, cp3 = st.columns(3)
+        cp1.metric("✅ Facturas pagas",    f"{pagos['pagadas']:,}")
+        cp2.metric("⏳ Facturas pendientes", f"{pagos['pendientes']:,}")
+        cp3.metric("💸 Deuda pendiente ARS", f"${pagos['monto_pendiente_ars']:,.0f}")
+        if pagos['pendientes'] > 0:
+            st.warning(f"⚠️ Tenés **{pagos['pendientes']} factura(s) sin pagar** por un total de **${pagos['monto_pendiente_ars']:,.0f} ARS**. Entrá a 📄 Facturas para registrar los pagos.")
 
     if n_fact == 0:
         st.info("Todavía no hay facturas. Usá **📤 Subir Facturas** para empezar.")
@@ -430,10 +442,11 @@ elif page == "📄 Facturas":
     proveedores = db.get_proveedores()
     prov_map    = {"Todos": None} | {p['nombre']: p['id'] for p in proveedores}
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
     prov_sel    = col1.selectbox("Proveedor", list(prov_map.keys()))
     fecha_desde = col2.date_input("Desde", value=date(date.today().year, 1, 1))
     fecha_hasta = col3.date_input("Hasta", value=date.today())
+    estado_sel  = col4.selectbox("Estado", ["Todas", "⏳ Pendientes", "✅ Pagas"])
 
     facturas = db.get_facturas(
         proveedor_id=prov_map[prov_sel],
@@ -448,11 +461,26 @@ elif page == "📄 Facturas":
     df = pd.DataFrame(facturas)
     df['fecha'] = df['fecha_display']
 
+    # Filtro por estado de pago
+    if estado_sel == "⏳ Pendientes":
+        df = df[df['pagada'] == 0]
+    elif estado_sel == "✅ Pagas":
+        df = df[df['pagada'] == 1]
+
+    if df.empty:
+        st.info("No hay facturas para los filtros seleccionados.")
+        st.stop()
+
+    # Columna de estado visual
+    df['estado'] = df['pagada'].apply(lambda x: '✅ Pagada' if x else '⏳ Pendiente')
+    df['fecha_pago_disp'] = df['fecha_pago_display']
+
     st.dataframe(
-        df[['numero', 'fecha', 'proveedor_nombre', 'subtotal',
-            'iva_21', 'iva_105', 'total', 'moneda']],
+        df[['estado', 'numero', 'fecha', 'proveedor_nombre', 'subtotal',
+            'iva_21', 'iva_105', 'total', 'moneda', 'fecha_pago_disp']],
         use_container_width=True,
         column_config={
+            'estado':           st.column_config.TextColumn('Estado', width='small'),
             'numero':           'Número',
             'fecha':            'Fecha',
             'proveedor_nombre': 'Proveedor',
@@ -460,7 +488,8 @@ elif page == "📄 Facturas":
             'iva_21':   st.column_config.NumberColumn('IVA 21%',    format="$%.2f"),
             'iva_105':  st.column_config.NumberColumn('IVA 10.5%',  format="$%.2f"),
             'total':    st.column_config.NumberColumn('Total',      format="$%.2f"),
-            'moneda':   'Moneda',
+            'moneda':   st.column_config.TextColumn('Moneda', width='small'),
+            'fecha_pago_disp': 'Fecha pago',
         },
         hide_index=True,
     )
@@ -472,6 +501,44 @@ elif page == "📄 Facturas":
         f"Total ARS: **${total_ars:,.2f}**"
         + (f"  |  Total USD: **U$S {total_usd:,.2f}**" if total_usd else "")
     )
+
+    # ── Registrar pagos ──────────────────────────────────────────────────────
+    st.divider()
+    todas_facturas = db.get_facturas(
+        proveedor_id=prov_map[prov_sel],
+        fecha_desde=fecha_desde.strftime('%Y-%m-%d'),
+        fecha_hasta=fecha_hasta.strftime('%Y-%m-%d'),
+    )
+    pendientes = [f for f in todas_facturas if not f.get('pagada')]
+    pagas      = [f for f in todas_facturas if f.get('pagada')]
+
+    with st.expander("💳 Registrar pago"):
+        if pendientes:
+            st.markdown("**Marcar como pagada**")
+            opc_pend = {
+                f"{f['numero']}  —  {f['proveedor_nombre']}  —  ${f['total']:,.0f}": f['id']
+                for f in pendientes
+            }
+            sel_pend   = st.selectbox("Factura pendiente", list(opc_pend.keys()), key="sel_pend")
+            fecha_pago = st.date_input("Fecha de pago", value=date.today(), key="fecha_pago_inp")
+            if st.button("✅ Marcar como pagada", type="primary", key="btn_pagar"):
+                db.marcar_pagada(opc_pend[sel_pend], fecha_pago.strftime('%Y-%m-%d'))
+                st.success("✅ Factura marcada como pagada.")
+                st.rerun()
+        else:
+            st.success("🎉 ¡Todas las facturas del período están pagas!")
+
+        if pagas:
+            st.markdown("---")
+            st.markdown("**Deshacer pago** (marcar como pendiente)")
+            opc_paga = {
+                f"{f['numero']}  —  {f['proveedor_nombre']}  —  pagada {f['fecha_pago_display']}": f['id']
+                for f in pagas
+            }
+            sel_paga = st.selectbox("Factura pagada", list(opc_paga.keys()), key="sel_paga")
+            if st.button("↩️ Marcar como pendiente", key="btn_impagar"):
+                db.marcar_impaga(opc_paga[sel_paga])
+                st.rerun()
 
     # ── Eliminar factura ─────────────────────────────────────────────────────
     st.divider()

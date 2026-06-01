@@ -34,6 +34,20 @@ def get_conn():
 
 # ── Creación de tablas ────────────────────────────────────────────────────────
 
+def _migrate():
+    """Agrega columnas nuevas a tablas existentes (seguro si ya existen)."""
+    nuevas = [
+        ("facturas", "pagada",     "INTEGER DEFAULT 0"),
+        ("facturas", "fecha_pago", "TEXT"),
+    ]
+    with get_conn() as conn:
+        for tabla, col, definicion in nuevas:
+            try:
+                conn.execute(f"ALTER TABLE {tabla} ADD COLUMN {col} {definicion}")
+            except Exception:
+                pass  # la columna ya existe
+
+
 def init_db():
     with get_conn() as conn:
         conn.executescript("""
@@ -89,6 +103,7 @@ def init_db():
             updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """)
+    _migrate()
 
 
 # ── Utilidades de fecha ───────────────────────────────────────────────────────
@@ -174,6 +189,42 @@ def insert_items(factura_id, items):
 
 # ── Lectura ───────────────────────────────────────────────────────────────────
 
+def marcar_pagada(factura_id, fecha_pago=None):
+    """Marca una factura como pagada."""
+    import datetime
+    if not fecha_pago:
+        fecha_pago = datetime.date.today().strftime('%Y-%m-%d')
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE facturas SET pagada=1, fecha_pago=? WHERE id=?",
+            (fecha_pago, factura_id)
+        )
+
+
+def marcar_impaga(factura_id):
+    """Quita el estado de pagada de una factura."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE facturas SET pagada=0, fecha_pago=NULL WHERE id=?",
+            (factura_id,)
+        )
+
+
+def get_resumen_pagos():
+    """Devuelve totales de facturas pagadas y pendientes."""
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT
+                COUNT(*)                                               AS total,
+                COALESCE(SUM(CASE WHEN pagada=0 THEN 1 ELSE 0 END),0) AS pendientes,
+                COALESCE(SUM(CASE WHEN pagada=1 THEN 1 ELSE 0 END),0) AS pagadas,
+                COALESCE(SUM(CASE WHEN pagada=0 AND moneda='ARS'
+                                  THEN total ELSE 0 END), 0)          AS monto_pendiente_ars
+            FROM facturas
+        """).fetchone()
+    return dict(row)
+
+
 def delete_factura(factura_id):
     """Elimina una factura y todos sus ítems."""
     with get_conn() as conn:
@@ -211,7 +262,8 @@ def get_facturas(proveedor_id=None, fecha_desde=None, fecha_hasta=None):
         rows = conn.execute(q, params).fetchall()
         result = [dict(r) for r in rows]
     for r in result:
-        r['fecha_display'] = _to_display(r['fecha'])
+        r['fecha_display']     = _to_display(r['fecha'])
+        r['fecha_pago_display'] = _to_display(r.get('fecha_pago', ''))
     return result
 
 
