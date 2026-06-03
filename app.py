@@ -18,7 +18,7 @@ importlib.reload(extractor)
 importlib.reload(db)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.03-f"
+APP_VERSION = "2026.06.03-g"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -487,11 +487,12 @@ elif page == "📄 Facturas":
     proveedores = db.get_proveedores()
     prov_map    = {"Todos": None} | {p['nombre']: p['id'] for p in proveedores}
 
-    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+    col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 1])
     prov_sel    = col1.selectbox("Proveedor", list(prov_map.keys()))
     fecha_desde = col2.date_input("Desde", value=date(date.today().year, 1, 1))
     fecha_hasta = col3.date_input("Hasta", value=date.today())
     estado_sel  = col4.selectbox("Estado", ["Todas", "⏳ Pendientes", "✅ Pagas"])
+    tipo_sel    = col5.selectbox("Tipo", ["Todos", "FC", "ND", "NC"])
 
     facturas = db.get_facturas(
         proveedor_id=prov_map[prov_sel],
@@ -512,6 +513,13 @@ elif page == "📄 Facturas":
     elif estado_sel == "✅ Pagas":
         df = df[df['pagada'] == 1]
 
+    # Filtro por tipo de comprobante
+    if 'tipo' not in df.columns:
+        df['tipo'] = 'FC'
+    df['tipo'] = df['tipo'].fillna('FC')
+    if tipo_sel != "Todos":
+        df = df[df['tipo'] == tipo_sel]
+
     if df.empty:
         st.info("No hay facturas para los filtros seleccionados.")
         st.stop()
@@ -521,10 +529,11 @@ elif page == "📄 Facturas":
     df['fecha_pago_disp'] = df['fecha_pago_display']
 
     st.dataframe(
-        df[['estado', 'numero', 'fecha', 'proveedor_nombre', 'subtotal',
+        df[['tipo', 'estado', 'numero', 'fecha', 'proveedor_nombre', 'subtotal',
             'iva_21', 'iva_105', 'total', 'moneda', 'fecha_pago_disp']],
         use_container_width=True,
         column_config={
+            'tipo':             st.column_config.TextColumn('Tipo', width='small', help='FC=Factura · ND=Nota de Débito · NC=Nota de Crédito'),
             'estado':           st.column_config.TextColumn('Estado', width='small'),
             'numero':           'Número',
             'fecha':            'Fecha',
