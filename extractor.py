@@ -184,6 +184,7 @@ def _parse_full(text, filename, tables=None, config=None):
         header.setdefault('proveedor_nombre', 'CAMBRE I.C. y F.S.A.')
         items = _items_cambre(text)
     elif '30-61406102-9' in text:
+        header.setdefault('proveedor_nombre', 'FABRICA ARGENTINA DE CONDUCTORES BIMETALICOS S.A.')
         items = _items_cant_first(text)
     else:
         header_hint = config.get('header_trigger') if config else None
@@ -317,6 +318,7 @@ def _parse_header(text, filename):
         '20-14772827-2': 'PRIOLO DANIEL ROBERTO',
         '20147728272':   'PRIOLO DANIEL ROBERTO',
         '30-50194898-1': 'CAMBRE I.C. y F.S.A.',
+        '30-61406102-9': 'FABRICA ARGENTINA DE CONDUCTORES BIMETALICOS S.A.',
     }
     for cuit_known, nombre_known in _nombres_por_cuit.items():
         if cuit_known in text:
