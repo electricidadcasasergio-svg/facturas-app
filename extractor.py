@@ -213,6 +213,16 @@ def _parse_full(text, filename, tables=None, config=None):
 def _parse_header(text, filename):
     h = {'archivo_nombre': filename}
 
+    # Tipo de comprobante: FC (factura), ND (nota débito), NC (nota crédito)
+    # Se busca cerca del inicio para no confundir con menciones en el cuerpo.
+    cabecera = text[:600]
+    if re.search(r'NOTA\s+DE\s+CR[EÉ]?DITO', cabecera, re.IGNORECASE):
+        h['tipo'] = 'NC'
+    elif re.search(r'NOTA\s+DE\s+D[EÉ]?BITO', cabecera, re.IGNORECASE):
+        h['tipo'] = 'ND'
+    else:
+        h['tipo'] = 'FC'
+
     # ── Separar la sección del PROVEEDOR de la del COMPRADOR ─────────────────
     # En una factura argentina el vendedor va PRIMERO y luego los datos del
     # cliente aparecen tras líneas como "Señor(es):", "Cliente:", "Sr.(es):", etc.

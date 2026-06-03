@@ -18,7 +18,7 @@ importlib.reload(extractor)
 importlib.reload(db)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.03-e"
+APP_VERSION = "2026.06.03-f"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -304,14 +304,23 @@ elif page == "📤 Subir Facturas":
             continue
 
         items = data.get('items', [])
+        TIPO_LABEL = {'FC': 'Factura', 'ND': 'Nota de Débito', 'NC': 'Nota de Crédito'}
+        tipo_doc = data.get('tipo', 'FC')
         label = (
             f"✅ {f.name}  —  "
+            f"{TIPO_LABEL.get(tipo_doc, 'Factura')}  |  "
             f"{data.get('proveedor_nombre','?')}  |  "
             f"{data.get('numero','?')}  |  "
             f"{data.get('fecha','?')}"
         )
 
         with st.expander(label, expanded=True):
+
+            # Aviso de tipo de comprobante
+            if tipo_doc == 'NC':
+                st.info("🟦 **Nota de Crédito** — se RESTARÁ del saldo del proveedor en la cuenta corriente.")
+            elif tipo_doc == 'ND':
+                st.info("🟧 **Nota de Débito** — se SUMARÁ al saldo del proveedor (igual que una factura).")
 
             # Aviso: factura de VENTA emitida por Casa Sergio (no es una compra)
             if data.get('es_venta'):
@@ -448,6 +457,7 @@ elif page == "📤 Subir Facturas":
                         tc,
                         f.name,
                         data.get('cae', ''),
+                        data.get('tipo', 'FC'),
                     )
                     if fac_id:
                         if items_to_save:
@@ -676,7 +686,10 @@ elif page == "📊 Cta. Cte.":
 
     if movs:
         df_movs = pd.DataFrame(movs)
-        df_movs['tipo_icon'] = df_movs['tipo'].map({'FACTURA': '🧾 Factura', 'PAGO': '💳 Pago'})
+        df_movs['tipo_icon'] = df_movs['tipo'].map({
+            'FACTURA': '🧾 Factura', 'N. DÉBITO': '🟧 N. Débito',
+            'N. CRÉDITO': '🟦 N. Crédito', 'PAGO': '💳 Pago',
+        }).fillna(df_movs['tipo'])
         st.dataframe(
             df_movs[['fecha_display', 'tipo_icon', 'descripcion', 'debe', 'haber', 'saldo']],
             use_container_width=True,
