@@ -3,6 +3,7 @@ database.py — capa de datos para facturas-app.
 Usa SQLite local (archivo data/facturas.db).
 """
 import os
+import re
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -49,6 +50,61 @@ def _migrate():
                 conn.execute(f"ALTER TABLE {tabla} ADD COLUMN {col} {definicion}")
             except Exception:
                 pass  # la columna ya existe
+
+    _migrar_numero_unico()
+
+
+def _migrar_numero_unico():
+    """
+    Reconstruye 'facturas' para quitar el UNIQUE global sobre 'numero'.
+    El número debe ser único POR proveedor+tipo, no en todo el sistema
+    (dos proveedores pueden tener el mismo número de comprobante).
+    """
+    con = sqlite3.connect(DB_PATH)
+    con.isolation_level = None  # autocommit, para poder usar PRAGMA y BEGIN/COMMIT
+    try:
+        row = con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='facturas'"
+        ).fetchone()
+        if not row or not re.search(r'numero\s+TEXT\s+UNIQUE', row[0], re.IGNORECASE):
+            return  # ya migrado o tabla inexistente
+
+        cols = [r[1] for r in con.execute("PRAGMA table_info(facturas)").fetchall()]
+        collist = ', '.join(cols)
+
+        con.execute("PRAGMA foreign_keys=OFF")
+        con.executescript(f"""
+            BEGIN;
+            CREATE TABLE facturas_new (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                proveedor_id    INTEGER NOT NULL,
+                numero          TEXT NOT NULL,
+                fecha           TEXT NOT NULL,
+                subtotal        REAL DEFAULT 0,
+                iva_21          REAL DEFAULT 0,
+                iva_105         REAL DEFAULT 0,
+                percepciones    REAL DEFAULT 0,
+                total           REAL DEFAULT 0,
+                moneda          TEXT DEFAULT 'ARS',
+                tipo_cambio     REAL DEFAULT 1.0,
+                archivo_nombre  TEXT,
+                cae             TEXT,
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                pagada          INTEGER DEFAULT 0,
+                fecha_pago      TEXT,
+                tipo            TEXT DEFAULT 'FC',
+                archivo_path    TEXT
+            );
+            INSERT INTO facturas_new ({collist}) SELECT {collist} FROM facturas;
+            DROP TABLE facturas;
+            ALTER TABLE facturas_new RENAME TO facturas;
+            CREATE INDEX IF NOT EXISTS idx_facturas_fecha ON facturas(fecha);
+            CREATE INDEX IF NOT EXISTS idx_facturas_prov  ON facturas(proveedor_id);
+            COMMIT;
+        """)
+        con.execute("PRAGMA foreign_keys=ON")
+    finally:
+        con.close()
 
 
 def init_db():
@@ -165,20 +221,21 @@ def insert_factura(proveedor_id, numero, fecha, subtotal, iva_21, iva_105,
                    tipo='FC'):
     fecha_iso = _to_iso(fecha)
     with get_conn() as conn:
-        conn.execute("""
-            INSERT OR IGNORE INTO facturas
+        # Duplicado = mismo proveedor + mismo tipo + mismo número
+        existing = conn.execute("""
+            SELECT id FROM facturas
+            WHERE proveedor_id = ? AND numero = ? AND COALESCE(tipo,'FC') = ?
+        """, (proveedor_id, numero, tipo)).fetchone()
+        if existing:
+            return None
+        cur = conn.execute("""
+            INSERT INTO facturas
                 (proveedor_id, numero, fecha, subtotal, iva_21, iva_105,
                  percepciones, total, moneda, tipo_cambio, archivo_nombre, cae, tipo)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (proveedor_id, numero, fecha_iso, subtotal, iva_21, iva_105,
               percepciones, total, moneda, tipo_cambio, archivo_nombre, cae, tipo))
-        row = conn.execute(
-            "SELECT id FROM facturas WHERE numero = ?", (numero,)
-        ).fetchone()
-        # Si changes == 0 significa que ya existía (duplicado)
-        if conn.execute("SELECT changes()").fetchone()[0] == 0:
-            return None
-        return row['id'] if row else None
+        return cur.lastrowid
 
 
 def insert_items(factura_id, items):

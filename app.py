@@ -19,7 +19,7 @@ importlib.reload(extractor)
 importlib.reload(db)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.03-h"
+APP_VERSION = "2026.06.03-i"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
