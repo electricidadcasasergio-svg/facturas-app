@@ -183,6 +183,8 @@ def _parse_full(text, filename, tables=None, config=None):
     elif '30-50194898-1' in text:
         header.setdefault('proveedor_nombre', 'CAMBRE I.C. y F.S.A.')
         items = _items_cambre(text)
+    elif '30-61406102-9' in text:
+        items = _items_cant_first(text)
     else:
         header_hint = config.get('header_trigger') if config else None
         items = _items_generic(tables, text,
@@ -192,6 +194,12 @@ def _parse_full(text, filename, tables=None, config=None):
     moneda = header.get('moneda', 'ARS')
     for it in items:
         it.setdefault('moneda', moneda)
+
+    # Fallback de subtotal: suma de subtotales de ítems (si no se detectó en el pie)
+    if not header.get('subtotal') and items:
+        suma = sum(it.get('subtotal_siva', 0) for it in items)
+        if suma > 0:
+            header['subtotal'] = round(suma, 2)
 
     result = {**header, 'items': items}
     if discovered_config:
@@ -242,23 +250,31 @@ def _parse_header(text, filename):
         r'Factura\s+N[°º]?:?\s*(\d{4}-\d{5,8})',         # 0006-00139834
         r'Nº\s+(\d{4}\s*-\s*\d{5,8})',                   # Nº 0005 - 00113645 (KALOP)
         r'Nro\.CONTROL:(\w+)',                             # Nro.CONTROL:0005A00113645
+        r'\b(\d{5}\s+\d{8})\b',                          # 00005 00048513 (separado por espacio)
         r'\b([A-Z]?\d{4,5}-\d{6,8})\b',                  # fallback genérico
     ]:
         m = re.search(pat, text)
         if m:
-            h['numero'] = m.group(1).strip()
+            # Normalizar espacios internos a guión: "00005 00048513" → "00005-00048513"
+            h['numero'] = re.sub(r'\s+', '-', m.group(1).strip())
             break
 
-    # Fecha (DD/MM/YYYY) — buscar en todo el texto
+    # Fecha (DD/MM/YYYY o DD/MM/YY) — buscar en todo el texto
     for pat in [
         r'(?:Fecha[^\n:]*:|FECHA:)\s*(\d{2}/\d{2}/\d{4})',
         r'(?:Fecha\s+emisi[oó]n:?\s*)(\d{2}/\d{2}/\d{4})',
         r'\bFecha:\s*(\d{2}/\d{2}/\d{4})',
+        r'\bFecha:\s*(\d{2}/\d{2}/\d{2})(?!\d)',          # Fecha: 03/06/26 (año 2 dígitos)
         r'\b(\d{2}/\d{2}/\d{4})\b',
+        r'\b(\d{2}/\d{2}/\d{2})(?!\d)',                    # fallback año 2 dígitos
     ]:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
-            h['fecha'] = m.group(1)
+            f = m.group(1)
+            # Expandir año de 2 dígitos a 4 (20YY)
+            if len(f) == 8:
+                f = f[:6] + '20' + f[6:]
+            h['fecha'] = f
             break
 
     # CUITs — excluir los CUITs propios de Casa Sergio; el primero restante es el proveedor
@@ -448,8 +464,8 @@ def _parse_header(text, filename):
     if m:
         h['percepciones'] = _parse_num(m.group(1))
 
-    # Total — excluir SUBTOTAL (lookbehind); tomar el mayor valor encontrado
-    totales = re.findall(r'(?<![A-Za-z])TOTAL\b[^\d\n$]*\$?\s*([\d.,]+)', text, re.IGNORECASE)
+    # Total — excluir SUBTOTAL (lookbehind); número en la MISMA línea (no cruzar \n)
+    totales = re.findall(r'(?<![A-Za-z])TOTAL\b[^\d\n$]*\$?[^\S\n]*([\d.,]+)', text, re.IGNORECASE)
     if totales:
         h['total'] = max((_parse_num(t) for t in totales), default=0)
 
@@ -827,6 +843,86 @@ def _items_cambre(text):
             'cantidad':         cant,
             'precio_unit':      precio,
             'descuento_pct':    desc_efectivo,
+            'precio_neto_unit': precio_neto,
+            'iva_pct':          iva,
+            'subtotal_siva':    total,
+        })
+
+    return items
+
+
+# ── Parser "cantidad primero" (CONDUWELD / CUIT 30-61406102-9) ───────────────
+# Columnas: Cantidad | Artículo | Unidad+Descripción | Precio Unitario | %IVA | Bonif. | Total
+# Formato numérico AMERICANO: 161,634.60 = 161.634,60
+# La cantidad va PRIMERO, luego el código (L1415-250, OMA1...).
+
+def _items_cant_first(text):
+    items = []
+    lines = text.split('\n')
+    in_table = False
+
+    def _num(s):
+        s = re.sub(r'[\s%$]', '', str(s)).strip()
+        if not s or s == '-':
+            return 0.0
+        s = s.replace(',', '')   # coma = miles
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+
+    for line in lines:
+        lu = line.upper()
+        if not in_table:
+            if 'CANTIDAD' in lu and 'PRECIO' in lu and 'ART' in lu:
+                in_table = True
+            continue
+
+        if re.match(r'\s*(COND\.?\s*DE\s*PAGO|CONTADO|Tipo\s+de\s+Cambio|'
+                    r'\$\s*TOTAL|Subtotal|SON\s+PESOS|CAE|PerIB|Tot\.Kg)',
+                    line, re.IGNORECASE):
+            break
+
+        stripped = line.strip()
+        if not stripped or stripped.startswith('.'):
+            continue
+
+        # Cantidad (num) + Código (alfanumérico) + resto
+        mh = re.match(r'^(\d+(?:[.,]\d+)?)\s+([A-Z0-9][A-Z0-9\-/.]*)\s+(.+)$', stripped)
+        if not mh:
+            if items:   # continuación de descripción
+                items[-1]['descripcion'] += ' ' + stripped
+            continue
+
+        cant   = _num(mh.group(1))
+        codigo = mh.group(2)
+        rest   = mh.group(3)
+        tokens = rest.split()
+
+        # Números al final (precio, iva, [bonif], total)
+        trailing = []
+        k = len(tokens) - 1
+        while k >= 0 and re.match(r'^[\d.,]+$', tokens[k]):
+            trailing.insert(0, tokens[k])
+            k -= 1
+        descripcion = ' '.join(tokens[:k + 1]).strip()
+
+        if len(trailing) < 3:
+            continue
+
+        precio = _num(trailing[0])
+        iva    = _num(trailing[1])
+        total  = _num(trailing[-1])
+        bonif  = _num(trailing[2]) if len(trailing) >= 4 else 0.0
+
+        precio_neto = round(total / cant, 4) if cant else precio
+
+        items.append({
+            'sku':              codigo,
+            'descripcion':      descripcion,
+            'cantidad':         cant,
+            'precio_unit':      precio,
+            'descuento_pct':    bonif,
             'precio_neto_unit': precio_neto,
             'iva_pct':          iva,
             'subtotal_siva':    total,

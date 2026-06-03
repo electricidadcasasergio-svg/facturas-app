@@ -318,6 +318,17 @@ def delete_factura(factura_id):
         conn.execute("DELETE FROM facturas WHERE id = ?",         (factura_id,))
 
 
+def get_proveedor_nombre_por_cuit(cuit):
+    """Devuelve el nombre guardado de un proveedor por su CUIT, o None."""
+    if not cuit:
+        return None
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT nombre FROM proveedores WHERE cuit = ?", (cuit,)
+        ).fetchone()
+    return row['nombre'] if row else None
+
+
 def get_proveedores():
     with get_conn() as conn:
         rows = conn.execute(

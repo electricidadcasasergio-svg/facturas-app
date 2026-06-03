@@ -269,6 +269,9 @@ elif page == "📤 Subir Facturas":
         except AttributeError:
             cuit_hint = None
         proveedor_config = db.get_proveedor_config(cuit_hint) if cuit_hint else None
+        nombre_guardado  = (db.get_proveedor_nombre_por_cuit(cuit_hint)
+                            if cuit_hint and hasattr(db, 'get_proveedor_nombre_por_cuit')
+                            else None)
 
         with st.spinner(f"Procesando **{f.name}**…"):
             try:
@@ -312,7 +315,8 @@ elif page == "📤 Subir Facturas":
             st.caption("Revisá y corregí si algo no se detectó bien.")
 
             c1, c2 = st.columns(2)
-            nombre_det  = data.get('proveedor_nombre', '')
+            # Si el CUIT ya está guardado, usar ese nombre (más confiable que el detectado)
+            nombre_det  = nombre_guardado or data.get('proveedor_nombre', '')
             cuit_det    = data.get('proveedor_cuit', '')
             numero_det  = data.get('numero', '')
             fecha_det   = data.get('fecha', date.today().strftime('%d/%m/%Y'))
