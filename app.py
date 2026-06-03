@@ -10,6 +10,9 @@ import streamlit as st
 import database as db
 import extractor
 
+# Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
+APP_VERSION = "2026.06.03-a"
+
 # ── Config ───────────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -170,6 +173,12 @@ page = st.sidebar.radio(
     "Navegación",
     ["🏠 Inicio", "📤 Subir Facturas", "📄 Facturas", "📊 Cta. Cte.", "🔍 SKUs", "⚖️ Comparar", "🏢 Proveedores"],
     label_visibility="collapsed",
+)
+
+st.sidebar.markdown(
+    f"<div style='position:fixed;bottom:10px;font-size:0.7rem;color:rgba(255,255,255,0.45);'>"
+    f"versión {APP_VERSION}</div>",
+    unsafe_allow_html=True,
 )
 
 
