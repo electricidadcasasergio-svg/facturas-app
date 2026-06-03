@@ -18,7 +18,7 @@ importlib.reload(extractor)
 importlib.reload(db)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.03-c"
+APP_VERSION = "2026.06.03-d"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -633,8 +633,14 @@ elif page == "📊 Cta. Cte.":
 
     df_show = df_sal[['nombre', 'total_facturas', 'total_pagos', 'saldo']].copy()
     df_show.columns = ['Proveedor', 'Facturado ARS', 'Pagado ARS', 'Saldo ARS']
+    # pandas ≥2.1 renombró Styler.applymap → Styler.map (compatibilidad ambas versiones)
+    _styler = df_show.style
+    if hasattr(_styler, 'map'):
+        _styler = _styler.map(_color_saldo, subset=['Saldo ARS'])
+    else:
+        _styler = _styler.applymap(_color_saldo, subset=['Saldo ARS'])
     st.dataframe(
-        df_show.style.applymap(_color_saldo, subset=['Saldo ARS']),
+        _styler,
         use_container_width=True,
         hide_index=True,
         column_config={
