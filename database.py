@@ -514,7 +514,7 @@ def get_items_by_sku(sku, proveedor_id=None):
     return result
 
 
-def search_skus(query_str, proveedor_id=None):
+def search_skus(query_str, proveedor_id=None, limit=50):
     q = """
         SELECT i.sku, i.descripcion, i.moneda,
                p.nombre AS proveedor_nombre, p.id AS proveedor_id,
@@ -530,7 +530,9 @@ def search_skus(query_str, proveedor_id=None):
     if proveedor_id:
         q += " AND f.proveedor_id = ?"
         params.append(proveedor_id)
-    q += " GROUP BY i.sku, i.descripcion, i.moneda, p.nombre, p.id ORDER BY veces_comprado DESC LIMIT 50"
+    q += (" GROUP BY i.sku, i.descripcion, i.moneda, p.nombre, p.id "
+          "ORDER BY veces_comprado DESC LIMIT ?")
+    params.append(limit)
     with get_conn() as conn:
         rows = conn.execute(q, params).fetchall()
         result = [dict(r) for r in rows]

@@ -19,7 +19,7 @@ importlib.reload(extractor)
 importlib.reload(db)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.03-j"
+APP_VERSION = "2026.06.03-k"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -836,19 +836,28 @@ elif page == "🔍 SKUs":
 
     col1, col2 = st.columns([3, 1])
     buscar   = col1.text_input(
-        "Buscar por código o descripción",
+        "Buscar por código o descripción (opcional si elegís un proveedor)",
         placeholder="ej: VAMD100CA3  o  VOLTAMETRO  o  087402",
     )
     prov_sel = col2.selectbox("Proveedor", list(prov_map.keys()), key="prov_sku")
 
-    if not buscar:
-        st.info("Escribí un código o descripción para buscar.")
+    prov_id_sku = prov_map[prov_sel]
+
+    # Permitir buscar sin texto si hay un proveedor elegido → lista todos sus productos
+    if not buscar and prov_id_sku is None:
+        st.info("Escribí un código/descripción, o elegí un proveedor para ver todos sus productos.")
         st.stop()
 
-    resultados = db.search_skus(buscar, prov_map[prov_sel])
+    # Más resultados cuando se listan todos los productos de un proveedor
+    limite = 500 if not buscar else 100
+    resultados = db.search_skus(buscar, prov_id_sku, limit=limite)
     if not resultados:
-        st.warning("No se encontraron SKUs con esos términos.")
+        st.warning("No se encontraron productos para ese criterio.")
         st.stop()
+
+    if not buscar:
+        st.caption(f"Mostrando {len(resultados)} producto(s) de **{prov_sel}** "
+                   f"(ordenados por más comprados).")
 
     df_res = pd.DataFrame(resultados)
     st.dataframe(
