@@ -298,6 +298,23 @@ def delete_pago(pago_id):
         conn.execute("DELETE FROM pagos WHERE id = ?", (pago_id,))
 
 
+def factura_ya_cargada(proveedor_cuit, numero, tipo='FC'):
+    """
+    Devuelve la factura existente (dict) si ya se cargó este comprobante
+    (mismo proveedor por CUIT + mismo número + mismo tipo), o None.
+    """
+    if not numero:
+        return None
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT f.id, f.numero, f.fecha, f.total, f.created_at
+            FROM facturas f
+            JOIN proveedores p ON f.proveedor_id = p.id
+            WHERE p.cuit = ? AND f.numero = ? AND COALESCE(f.tipo,'FC') = ?
+        """, (proveedor_cuit, numero, tipo)).fetchone()
+    return dict(row) if row else None
+
+
 def set_archivo_factura(factura_id, path):
     """Guarda la ruta del archivo original (PDF/imagen) de una factura."""
     with get_conn() as conn:

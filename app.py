@@ -19,7 +19,7 @@ importlib.reload(extractor)
 importlib.reload(db)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.03-i"
+APP_VERSION = "2026.06.03-j"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -317,6 +317,18 @@ elif page == "📤 Subir Facturas":
 
         with st.expander(label, expanded=True):
 
+            # Aviso de DUPLICADO — ya se cargó este comprobante
+            ya = None
+            if hasattr(db, 'factura_ya_cargada'):
+                ya = db.factura_ya_cargada(data.get('proveedor_cuit', ''),
+                                           data.get('numero', ''), tipo_doc)
+            if ya:
+                st.error(
+                    f"🔁 **Este comprobante YA está cargado.** "
+                    f"Número {ya['numero']} — total ${ya.get('total', 0):,.2f}. "
+                    f"No hace falta volver a subirlo."
+                )
+
             # Aviso de tipo de comprobante
             if tipo_doc == 'NC':
                 st.info("🟦 **Nota de Crédito** — se RESTARÁ del saldo del proveedor en la cuenta corriente.")
@@ -483,7 +495,11 @@ elif page == "📤 Subir Facturas":
                             + (" 🧠 Perfil de proveedor aprendido." if discovered and prov_cuit else "")
                         )
                     else:
-                        st.warning("⚠️ Esta factura ya estaba cargada (número duplicado).")
+                        st.error(
+                            f"🔁 **Ya habías subido este comprobante** "
+                            f"({TIPO_LABEL.get(tipo_doc,'Factura')} {fac_numero} de {prov_nombre}). "
+                            f"No se cargó de nuevo para no duplicarlo."
+                        )
                 except Exception as e:
                     st.error(f"Error al guardar: {e}")
 
