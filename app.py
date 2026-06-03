@@ -18,7 +18,7 @@ importlib.reload(extractor)
 importlib.reload(db)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.03-b"
+APP_VERSION = "2026.06.03-c"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -331,8 +331,14 @@ elif page == "📤 Subir Facturas":
             st.caption("Revisá y corregí si algo no se detectó bien.")
 
             c1, c2 = st.columns(2)
-            # Si el CUIT ya está guardado, usar ese nombre (más confiable que el detectado)
-            nombre_det  = nombre_guardado or data.get('proveedor_nombre', '')
+            # Prioridad del nombre del proveedor:
+            #  1) si el extractor lo detectó del mapa de CUITs conocidos → es confiable
+            #  2) si no, el nombre guardado en la base (corrección previa del usuario)
+            #  3) si no, lo que haya detectado el extractor
+            if data.get('proveedor_nombre_fiable'):
+                nombre_det = data.get('proveedor_nombre', '')
+            else:
+                nombre_det = nombre_guardado or data.get('proveedor_nombre', '')
             cuit_det    = data.get('proveedor_cuit', '')
             numero_det  = data.get('numero', '')
             fecha_det   = data.get('fecha', date.today().strftime('%d/%m/%Y'))

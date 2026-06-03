@@ -322,7 +322,8 @@ def _parse_header(text, filename):
     }
     for cuit_known, nombre_known in _nombres_por_cuit.items():
         if cuit_known in text:
-            h.setdefault('proveedor_nombre', nombre_known)
+            h['proveedor_nombre'] = nombre_known
+            h['proveedor_nombre_fiable'] = True   # viene del mapa → tiene prioridad
             break
 
     if 'proveedor_nombre' not in h:
