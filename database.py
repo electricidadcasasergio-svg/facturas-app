@@ -39,8 +39,9 @@ def _migrate():
     nuevas = [
         ("facturas", "pagada",     "INTEGER DEFAULT 0"),
         ("facturas", "fecha_pago", "TEXT"),
-        ("facturas", "tipo",       "TEXT DEFAULT 'FC'"),
-        ("pagos",    "moneda",     "TEXT DEFAULT 'ARS'"),
+        ("facturas", "tipo",         "TEXT DEFAULT 'FC'"),
+        ("facturas", "archivo_path", "TEXT"),
+        ("pagos",    "moneda",       "TEXT DEFAULT 'ARS'"),
     ]
     with get_conn() as conn:
         for tabla, col, definicion in nuevas:
@@ -238,6 +239,20 @@ def delete_pago(pago_id):
     """Elimina un pago registrado."""
     with get_conn() as conn:
         conn.execute("DELETE FROM pagos WHERE id = ?", (pago_id,))
+
+
+def set_archivo_factura(factura_id, path):
+    """Guarda la ruta del archivo original (PDF/imagen) de una factura."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE facturas SET archivo_path = ? WHERE id = ?",
+            (path, factura_id)
+        )
+
+
+# Carpeta donde se guardan los comprobantes originales
+ARCHIVOS_DIR = DB_PATH.parent / 'archivos'
+ARCHIVOS_DIR.mkdir(exist_ok=True)
 
 
 def get_cuenta_corriente(proveedor_id, moneda='ARS'):

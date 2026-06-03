@@ -1,3 +1,4 @@
+import base64
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -18,7 +19,7 @@ importlib.reload(extractor)
 importlib.reload(db)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.03-g"
+APP_VERSION = "2026.06.03-h"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -463,6 +464,15 @@ elif page == "📤 Subir Facturas":
                         if items_to_save:
                             db.insert_items(fac_id, items_to_save)
 
+                        # Guardar el archivo original para poder verlo después
+                        try:
+                            ext  = Path(f.name).suffix.lower()
+                            dest = db.ARCHIVOS_DIR / f"{fac_id}{ext}"
+                            dest.write_bytes(f.getvalue())
+                            db.set_archivo_factura(fac_id, str(dest))
+                        except Exception:
+                            pass
+
                         # Guardar perfil del proveedor para mejorar futuras extracciones
                         discovered = data.get('_discovered_config', {})
                         if discovered and prov_cuit:
@@ -525,28 +535,71 @@ elif page == "📄 Facturas":
         st.stop()
 
     # Columna de estado visual
+    df = df.reset_index(drop=True)
     df['estado'] = df['pagada'].apply(lambda x: '✅ Pagada' if x else '⏳ Pendiente')
     df['fecha_pago_disp'] = df['fecha_pago_display']
 
-    st.dataframe(
-        df[['tipo', 'estado', 'numero', 'fecha', 'proveedor_nombre', 'subtotal',
-            'iva_21', 'iva_105', 'total', 'moneda', 'fecha_pago_disp']],
-        use_container_width=True,
-        column_config={
-            'tipo':             st.column_config.TextColumn('Tipo', width='small', help='FC=Factura · ND=Nota de Débito · NC=Nota de Crédito'),
-            'estado':           st.column_config.TextColumn('Estado', width='small'),
-            'numero':           'Número',
-            'fecha':            'Fecha',
-            'proveedor_nombre': 'Proveedor',
-            'subtotal': st.column_config.NumberColumn('Subtotal',   format="$%.2f"),
-            'iva_21':   st.column_config.NumberColumn('IVA 21%',    format="$%.2f"),
-            'iva_105':  st.column_config.NumberColumn('IVA 10.5%',  format="$%.2f"),
-            'total':    st.column_config.NumberColumn('Total',      format="$%.2f"),
-            'moneda':   st.column_config.TextColumn('Moneda', width='small'),
-            'fecha_pago_disp': 'Fecha pago',
-        },
-        hide_index=True,
-    )
+    cols_tabla = ['tipo', 'estado', 'numero', 'fecha', 'proveedor_nombre', 'subtotal',
+                  'iva_21', 'iva_105', 'total', 'moneda', 'fecha_pago_disp']
+    cfg_tabla = {
+        'tipo':             st.column_config.TextColumn('Tipo', width='small', help='FC=Factura · ND=Nota de Débito · NC=Nota de Crédito'),
+        'estado':           st.column_config.TextColumn('Estado', width='small'),
+        'numero':           'Número',
+        'fecha':            'Fecha',
+        'proveedor_nombre': 'Proveedor',
+        'subtotal': st.column_config.NumberColumn('Subtotal',   format="$%.2f"),
+        'iva_21':   st.column_config.NumberColumn('IVA 21%',    format="$%.2f"),
+        'iva_105':  st.column_config.NumberColumn('IVA 10.5%',  format="$%.2f"),
+        'total':    st.column_config.NumberColumn('Total',      format="$%.2f"),
+        'moneda':   st.column_config.TextColumn('Moneda', width='small'),
+        'fecha_pago_disp': 'Fecha pago',
+    }
+
+    st.caption("👆 Hacé clic en una fila para ver el comprobante original abajo.")
+
+    # Tabla con selección de fila (si la versión de Streamlit lo soporta)
+    fila_sel = None
+    try:
+        event = st.dataframe(
+            df[cols_tabla], use_container_width=True, hide_index=True,
+            column_config=cfg_tabla, on_select="rerun", selection_mode="single-row",
+            key="tabla_facturas",
+        )
+        rows_sel = list(event.selection.rows)
+        if rows_sel:
+            fila_sel = df.iloc[rows_sel[0]]
+    except TypeError:
+        # Versión vieja de Streamlit sin selección → tabla normal
+        st.dataframe(df[cols_tabla], use_container_width=True, hide_index=True,
+                     column_config=cfg_tabla)
+
+    # ── Visor del comprobante seleccionado ───────────────────────────────────
+    if fila_sel is not None:
+        st.divider()
+        st.markdown(f"#### 📎 Comprobante: {fila_sel['numero']} — {fila_sel['proveedor_nombre']}")
+        archivo = fila_sel.get('archivo_path')
+        if not archivo or not Path(str(archivo)).exists():
+            st.warning(
+                "No hay archivo original guardado para este comprobante. "
+                "Se guarda automáticamente a partir de ahora; los cargados antes "
+                "no tienen copia. Volvé a subirlo si querés verlo."
+            )
+        else:
+            ruta = Path(str(archivo))
+            datos = ruta.read_bytes()
+            st.download_button("⬇️ Descargar original", datos,
+                               file_name=ruta.name, key="dl_comp")
+            ext = ruta.suffix.lower()
+            if ext in ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'):
+                st.image(datos, use_container_width=True)
+            elif ext == '.pdf':
+                b64 = base64.b64encode(datos).decode()
+                st.markdown(
+                    f'<iframe src="data:application/pdf;base64,{b64}" '
+                    f'width="100%" height="800" style="border:1px solid #d8e5f5;border-radius:8px;"></iframe>',
+                    unsafe_allow_html=True,
+                )
+                st.caption("Si el PDF no se ve, usá el botón de descarga.")
 
     total_ars = df.loc[df['moneda'] == 'ARS', 'total'].sum()
     total_usd = df.loc[df['moneda'] == 'USD', 'total'].sum()
