@@ -180,6 +180,9 @@ def _parse_full(text, filename, tables=None, config=None):
     elif '20-14772827-2' in text or '20147728272' in text:
         header.setdefault('proveedor_nombre', 'PRIOLO DANIEL ROBERTO')
         items = _items_priolo(text)
+    elif '30-50194898-1' in text:
+        header.setdefault('proveedor_nombre', 'CAMBRE I.C. y F.S.A.')
+        items = _items_cambre(text)
     else:
         header_hint = config.get('header_trigger') if config else None
         items = _items_generic(tables, text,
@@ -297,6 +300,7 @@ def _parse_header(text, filename):
         '30-65233757-7': 'ACROPOLIS CABLES S.A. (KALOP)',
         '20-14772827-2': 'PRIOLO DANIEL ROBERTO',
         '20147728272':   'PRIOLO DANIEL ROBERTO',
+        '30-50194898-1': 'CAMBRE I.C. y F.S.A.',
     }
     for cuit_known, nombre_known in _nombres_por_cuit.items():
         if cuit_known in text:
@@ -331,6 +335,18 @@ def _parse_header(text, filename):
         )
         if m:
             h['proveedor_nombre'] = m.group(1).strip()
+
+    if 'proveedor_nombre' not in h:
+        # Estrategia 2c: línea que termina en abreviaturas con puntos
+        # Ej: "CAMBRE I.C. y F.S.A."  /  "X S.A.C.I.F.I."
+        m = re.search(
+            r'^([A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ0-9 .&/]{2,55}?(?:[A-Z]\.){2,})\s*$',
+            sup_text, re.MULTILINE
+        )
+        if m:
+            cand = m.group(1).strip()
+            if not _BUYER_LINE.match(cand):
+                h['proveedor_nombre'] = cand
 
     if 'proveedor_nombre' not in h:
         # Estrategia 3: "Nombre Apellido C.U.I.T.:" — persona física / monotributista
@@ -436,6 +452,15 @@ def _parse_header(text, filename):
     totales = re.findall(r'(?<![A-Za-z])TOTAL\b[^\d\n$]*\$?\s*([\d.,]+)', text, re.IGNORECASE)
     if totales:
         h['total'] = max((_parse_num(t) for t in totales), default=0)
+
+    # Fallback de total: el monto más grande del documento.
+    # Solo considera números con decimales (.XX o ,XX) → descarta O.C, CAE, CUIT.
+    if not h.get('total'):
+        nums = re.findall(r'\d[\d.,]*[.,]\d{2}(?!\d)', text)
+        vals = [_parse_num(n) for n in nums]
+        vals = [v for v in vals if v and v < 1e11]
+        if vals:
+            h['total'] = max(vals)
 
     return h
 
@@ -706,6 +731,106 @@ def _items_coresa(tables, text):
             # Línea de continuación → se suma a la descripción del último ítem
             if items and 'USD' not in stripped:
                 items[-1]['descripcion'] += ' ' + stripped
+
+    return items
+
+
+# ── Parser CAMBRE I.C. y F.S.A. ──────────────────────────────────────────────
+# Columnas: O/C | ARTÍCULO | DETALLE | CANTIDAD | PRECIO | DESCUENTOS(1-2) | %IVA | TOTAL
+# Formato numérico AMERICANO: 79,759.89 = 79.759,89 (coma miles, punto decimal)
+# Descuentos pueden ser uno ("37.00 %") o dos ("10.00 % 37.00 %").
+# El SKU tiene formato NNN-NNNNN (ej: 021-04004).
+
+def _items_cambre(text):
+    items = []
+    lines = text.split('\n')
+    in_table = False
+
+    def _num(s):
+        """Número americano de Cambre: 79,759.89 → 79759.89 ; 422.01 → 422.01."""
+        s = re.sub(r'[\s%$]', '', str(s)).strip()
+        if not s or s == '-':
+            return 0.0
+        s = s.replace(',', '')   # coma = separador de miles
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+
+    for line in lines:
+        lu = line.upper()
+        if not in_table:
+            # Encabezado: tiene ARTÍCULO/ART y CANTIDAD y PRECIO (tolerante a codificación)
+            if 'CANTIDAD' in lu and 'PRECIO' in lu and ('DETALLE' in lu or 'ART' in lu):
+                in_table = True
+            continue
+
+        # Fin de la tabla de ítems
+        if re.match(r'\s*(SUBTOTAL|%?\s*DTO|NIVEL|Son\s+en\s+PESOS|COTIZACION|'
+                    r'Nro\s+C\.A\.E|Centro\s+Industrial)', line, re.IGNORECASE):
+            break
+
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Debe empezar con SKU tipo 021-04004
+        mh = re.match(r'^(\d{2,3}-\d{3,6})\s+(.+)$', stripped)
+        if not mh:
+            # ¿continuación de descripción del ítem anterior?
+            if items and not re.search(r'\d[\d.,]*\s*%', stripped):
+                items[-1]['descripcion'] += ' ' + stripped
+            continue
+
+        sku  = mh.group(1)
+        rest = mh.group(2)
+        tokens = rest.split()
+
+        # Fusionar "37.00 %" → "37.00%"
+        merged = []
+        i = 0
+        while i < len(tokens):
+            if tokens[i] == '%' and merged and re.match(r'^[\d.,]+$', merged[-1]):
+                merged[-1] += '%'
+                i += 1
+            elif i + 1 < len(tokens) and tokens[i + 1] == '%' and re.match(r'^[\d.,]+$', tokens[i]):
+                merged.append(tokens[i] + '%')
+                i += 2
+            else:
+                merged.append(tokens[i])
+                i += 1
+        tokens = merged
+
+        # Parsear de DERECHA a IZQUIERDA:
+        #   total | iva | [descuentos %]... | precio | cantidad | <descripción>
+        if len(tokens) < 4:
+            continue
+        idx = len(tokens) - 1
+        total = _num(tokens[idx]); idx -= 1
+        iva   = _num(tokens[idx]); idx -= 1
+        descuentos = []
+        while idx >= 0 and tokens[idx].endswith('%'):
+            descuentos.insert(0, _num(tokens[idx])); idx -= 1
+        if idx < 1:
+            continue
+        precio = _num(tokens[idx]); idx -= 1
+        cant   = _num(tokens[idx]); idx -= 1
+        descripcion = ' '.join(tokens[:idx + 1]).strip()
+
+        # Precio neto unitario real = total / cantidad (ya incluye descuentos de línea)
+        precio_neto = round(total / cant, 4) if cant else precio
+        desc_efectivo = round((1 - precio_neto / precio) * 100, 2) if precio else 0.0
+
+        items.append({
+            'sku':              sku,
+            'descripcion':      descripcion,
+            'cantidad':         cant,
+            'precio_unit':      precio,
+            'descuento_pct':    desc_efectivo,
+            'precio_neto_unit': precio_neto,
+            'iva_pct':          iva,
+            'subtotal_siva':    total,
+        })
 
     return items
 
