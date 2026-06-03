@@ -294,6 +294,15 @@ elif page == "📤 Subir Facturas":
 
         with st.expander(label, expanded=True):
 
+            # Aviso: factura de VENTA emitida por Casa Sergio (no es una compra)
+            if data.get('es_venta'):
+                st.error(
+                    "🛑 **Esta parece una factura de VENTA emitida por Casa Sergio**, "
+                    "no una compra a un proveedor. Si la guardás, se registrará igual — "
+                    "pero normalmente acá cargamos solo **facturas de compra**. "
+                    "Revisá antes de guardar."
+                )
+
             # Indicador de proveedor conocido
             if proveedor_config:
                 st.success("✅ Proveedor conocido — se usó perfil guardado de facturas anteriores.")

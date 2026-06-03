@@ -274,6 +274,21 @@ def _parse_header(text, filename):
     if prov_cuits:
         h['proveedor_cuit'] = prov_cuits[0]
 
+    # ── Detectar facturas de VENTA (emitidas por Casa Sergio) ───────────────
+    # Si el primer CUIT del documento (el del emisor/vendedor) es propio,
+    # esta factura la emitió Casa Sergio → es una VENTA, no una compra.
+    primer_cuit = None
+    mfirst = re.search(r'(\d{2}-\d{8}-\d)', text)
+    if mfirst:
+        primer_cuit = mfirst.group(1)
+    es_venta_propia = (
+        primer_cuit in _OWN_CUITS
+        or re.search(r'(?:Electricidad e iluminaci[oó]n|de\s+Sergio\s+Gustavo\s+Milne|'
+                     r'ELECTRO\s+CASA\s+SERGIO)', text[:400], re.IGNORECASE) is not None
+    )
+    if es_venta_propia:
+        h['es_venta'] = True
+
     # Razón social del proveedor — varios intentos en orden de confianza
     _nombres_por_cuit = {
         '30-66180083-2': 'BAW ELECTRIC S.A.',
@@ -579,41 +594,63 @@ def _items_coresa(tables, text):
         price_context='price',   # USD usa coma decimal
     )
 
-    # Fallback texto
+    # Fallback texto — formato real Coresa (USD, descripción multi-línea):
+    #   001 MILAN-2CN-B TECLA MILAN BLANCO... USD 3,44 50 50% USD 1,72 10,50 USD 86,00
+    #       250V, 10A MAX. BASTIDOR METALICO          ← continuación de descripción
+    # Orden de columnas en datos:
+    #   item | código | descripción | PrecioUnit | Cant | Desc% | PrecioC/Desc | IVA% | Subtotal
     if not items:
         lines = text.split('\n')
         in_table = False
+
+        # Regex de fila de ítem (USD como ancla fuerte para separar desc de precios)
+        ITEM_RE = re.compile(
+            r'^(\d{1,4})\s+'                 # item
+            r'([A-Z0-9][A-Z0-9\-/.]*)\s+'    # código
+            r'(.+?)\s+'                       # descripción (lazy)
+            r'USD\s*([\d.,]+)\s+'             # precio unit
+            r'(\d+(?:[.,]\d+)?)\s+'          # cantidad
+            r'([\d.,]+)\s*%\s+'              # descuento %
+            r'USD\s*([\d.,]+)\s+'            # precio c/desc
+            r'([\d.,]+)\s+'                   # iva %
+            r'USD\s*([\d.,]+)$',             # subtotal s/iva
+            re.IGNORECASE
+        )
+
         for line in lines:
-            if re.search(r'Descripci[oó]n\s+Cant', line, re.IGNORECASE):
-                in_table = True
-                continue
+            # Encabezado: "Item Código Descripción Cant Desc IVA" (puede venir partido)
             if not in_table:
+                if (re.search(r'C[oó]digo\s+Descripci[oó]n', line, re.IGNORECASE)
+                        or re.search(r'Descripci[oó]n\s+Cant', line, re.IGNORECASE)):
+                    in_table = True
                 continue
-            if re.match(r'\s*(Subtotal|TOTAL|Para la cancelaci)', line, re.IGNORECASE):
+
+            if re.match(r'\s*(Subtotal|TOTAL|Son\s+Pesos|Para la cancelaci|'
+                        r'Neto\s+Gravado|CAE)', line, re.IGNORECASE):
                 break
-            line = line.strip()
-            if not line:
+
+            stripped = line.strip()
+            if not stripped:
                 continue
-            # "0 PER12CW DESC... 60 USD 6,740 50.00% USD 3,370 21.0% USD 202,20"
-            m = re.match(
-                r'^(\d+)\s+([A-Z0-9\-]+)\s+(.+?)\s+(\d+)\s+'
-                r'(?:USD\s*)?([\d,]+)\s+([\d.]+)%?\s+'
-                r'(?:USD\s*)?([\d,]+)\s+([\d.]+)%?\s+'
-                r'(?:USD\s*)?([\d,]+)$',
-                line
-            )
+
+            m = ITEM_RE.match(stripped)
             if m:
+                precio_unit = _parse_num(m.group(4))
+                precio_neto = _parse_num(m.group(7))
                 items.append({
                     'sku':              m.group(2),
                     'descripcion':      m.group(3).strip(),
-                    'cantidad':         _parse_num(m.group(4), context='qty'),
-                    'precio_unit':      _parse_num(m.group(5)),
+                    'cantidad':         _parse_num(m.group(5), context='qty'),
+                    'precio_unit':      precio_unit,
                     'descuento_pct':    _parse_num(m.group(6)),
-                    'precio_neto_unit': _parse_num(m.group(7)),
+                    'precio_neto_unit': precio_neto,
                     'iva_pct':          _parse_num(m.group(8)),
                     'subtotal_siva':    _parse_num(m.group(9)),
                     'moneda':           'USD',
                 })
+            elif items and not re.search(r'USD', stripped):
+                # Línea de continuación → se suma a la descripción del último ítem
+                items[-1]['descripcion'] += ' ' + stripped
 
     return items
 
