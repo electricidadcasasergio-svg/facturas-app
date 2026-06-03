@@ -39,6 +39,7 @@ def _migrate():
     nuevas = [
         ("facturas", "pagada",     "INTEGER DEFAULT 0"),
         ("facturas", "fecha_pago", "TEXT"),
+        ("pagos",    "moneda",     "TEXT DEFAULT 'ARS'"),
     ]
     with get_conn() as conn:
         for tabla, col, definicion in nuevas:
@@ -222,13 +223,13 @@ def marcar_impaga(factura_id):
         )
 
 
-def insert_pago(proveedor_id, monto, fecha, descripcion=''):
-    """Registra un pago a un proveedor."""
+def insert_pago(proveedor_id, monto, fecha, descripcion='', moneda='ARS'):
+    """Registra un pago a un proveedor (en ARS o USD)."""
     with get_conn() as conn:
         conn.execute("""
-            INSERT INTO pagos (proveedor_id, monto, fecha, descripcion)
-            VALUES (?, ?, ?, ?)
-        """, (proveedor_id, monto, _to_iso(fecha), descripcion))
+            INSERT INTO pagos (proveedor_id, monto, fecha, descripcion, moneda)
+            VALUES (?, ?, ?, ?, ?)
+        """, (proveedor_id, monto, _to_iso(fecha), descripcion, moneda))
 
 
 def delete_pago(pago_id):
@@ -237,9 +238,9 @@ def delete_pago(pago_id):
         conn.execute("DELETE FROM pagos WHERE id = ?", (pago_id,))
 
 
-def get_cuenta_corriente(proveedor_id):
+def get_cuenta_corriente(proveedor_id, moneda='ARS'):
     """
-    Devuelve (movimientos, saldo_actual) para un proveedor.
+    Devuelve (movimientos, saldo_actual) de UNA moneda para un proveedor.
     Movimientos ordenados por fecha: facturas (debe) + pagos (haber).
     """
     with get_conn() as conn:
@@ -247,15 +248,15 @@ def get_cuenta_corriente(proveedor_id):
             SELECT fecha, 'FACTURA' AS tipo,
                    'Factura ' || numero AS descripcion,
                    total AS debe, 0.0 AS haber, id AS ref_id
-            FROM facturas WHERE proveedor_id = ?
-        """, (proveedor_id,)).fetchall()
+            FROM facturas WHERE proveedor_id = ? AND moneda = ?
+        """, (proveedor_id, moneda)).fetchall()
 
         pagos = conn.execute("""
             SELECT fecha, 'PAGO' AS tipo,
                    COALESCE(descripcion, 'Pago') AS descripcion,
                    0.0 AS debe, monto AS haber, id AS ref_id
-            FROM pagos WHERE proveedor_id = ?
-        """, (proveedor_id,)).fetchall()
+            FROM pagos WHERE proveedor_id = ? AND COALESCE(moneda,'ARS') = ?
+        """, (proveedor_id, moneda)).fetchall()
 
     movs = [dict(r) for r in facturas] + [dict(r) for r in pagos]
     movs.sort(key=lambda x: x['fecha'] or '')
@@ -269,29 +270,42 @@ def get_cuenta_corriente(proveedor_id):
     return movs, saldo
 
 
+def get_monedas_proveedor(proveedor_id):
+    """Devuelve las monedas en las que el proveedor tiene facturas o pagos."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT moneda FROM facturas WHERE proveedor_id = ?
+            UNION
+            SELECT COALESCE(moneda,'ARS') FROM pagos WHERE proveedor_id = ?
+        """, (proveedor_id, proveedor_id)).fetchall()
+    monedas = sorted({r['moneda'] for r in rows if r['moneda']})
+    return monedas or ['ARS']
+
+
 def get_saldos_proveedores():
     """
-    Devuelve saldo (deuda) por proveedor:
-    saldo = total facturas ARS - total pagos
+    Saldo por proveedor, separado por moneda (ARS y USD):
+    saldo = total facturas - total pagos, por cada moneda.
     """
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT p.id, p.nombre, p.cuit,
-                   COALESCE(f.total_fact, 0)  AS total_facturas,
-                   COALESCE(pg.total_pago, 0) AS total_pagos,
-                   COALESCE(f.total_fact, 0) - COALESCE(pg.total_pago, 0) AS saldo
+                   COALESCE(fa.t, 0) AS fact_ars,
+                   COALESCE(fu.t, 0) AS fact_usd,
+                   COALESCE(pa.t, 0) AS pago_ars,
+                   COALESCE(pu.t, 0) AS pago_usd,
+                   COALESCE(fa.t, 0) - COALESCE(pa.t, 0) AS saldo_ars,
+                   COALESCE(fu.t, 0) - COALESCE(pu.t, 0) AS saldo_usd
             FROM proveedores p
-            LEFT JOIN (
-                SELECT proveedor_id, SUM(total) AS total_fact
-                FROM facturas WHERE moneda = 'ARS'
-                GROUP BY proveedor_id
-            ) f  ON f.proveedor_id  = p.id
-            LEFT JOIN (
-                SELECT proveedor_id, SUM(monto) AS total_pago
-                FROM pagos
-                GROUP BY proveedor_id
-            ) pg ON pg.proveedor_id = p.id
-            ORDER BY saldo DESC
+            LEFT JOIN (SELECT proveedor_id, SUM(total) t FROM facturas
+                       WHERE moneda='ARS' GROUP BY proveedor_id) fa ON fa.proveedor_id = p.id
+            LEFT JOIN (SELECT proveedor_id, SUM(total) t FROM facturas
+                       WHERE moneda='USD' GROUP BY proveedor_id) fu ON fu.proveedor_id = p.id
+            LEFT JOIN (SELECT proveedor_id, SUM(monto) t FROM pagos
+                       WHERE COALESCE(moneda,'ARS')='ARS' GROUP BY proveedor_id) pa ON pa.proveedor_id = p.id
+            LEFT JOIN (SELECT proveedor_id, SUM(monto) t FROM pagos
+                       WHERE moneda='USD' GROUP BY proveedor_id) pu ON pu.proveedor_id = p.id
+            ORDER BY saldo_ars DESC
         """).fetchall()
     return [dict(r) for r in rows]
 
