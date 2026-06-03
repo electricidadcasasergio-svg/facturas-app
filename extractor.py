@@ -402,8 +402,8 @@ def _parse_header(text, filename):
             text, re.IGNORECASE
         )
     if not m:
-        # 3) "Subtotal: 500.00" con dos puntos o etiqueta explícita
-        m = re.search(r'\bSubtotal\b\s*:\s*([\d.,]+)', text, re.IGNORECASE)
+        # 3) "Subtotal: USD 2.093,62" / "Subtotal: 500.00"
+        m = re.search(r'\bSubtotal\b\s*:?\s*(?:USD\s*)?\$?\s*([\d.,]+)', text, re.IGNORECASE)
     if m:
         h['subtotal'] = _parse_num(m.group(1))
     if not h.get('subtotal'):
@@ -417,13 +417,13 @@ def _parse_header(text, filename):
         if m:
             h['subtotal'] = _parse_num(m.group(1))
 
-    # IVA 21% — tolerar ":" y "$" entre etiqueta y número
-    m = re.search(r'IVA\s*21[%,°]?\s*[:\$]?\s*([\d.,]+)', text, re.IGNORECASE)
+    # IVA 21% — tolerar "_", ":", "$" y "USD" entre etiqueta y número
+    m = re.search(r'IVA[\s_]*21[%,°]?\s*[:\$]?\s*(?:USD\s*)?([\d.,]+)', text, re.IGNORECASE)
     if m:
         h['iva_21'] = _parse_num(m.group(1))
 
-    # IVA 10.5% — tolerar ":" y "$"
-    m = re.search(r'IVA\s*10[,.]?5[%,°]?\s*[:\$]?\s*([\d.,]+)', text, re.IGNORECASE)
+    # IVA 10.5% — igual tolerancia
+    m = re.search(r'IVA[\s_]*10[,.]?5[%,°]?\s*[:\$]?\s*(?:USD\s*)?([\d.,]+)', text, re.IGNORECASE)
     if m:
         h['iva_105'] = _parse_num(m.group(1))
 
@@ -594,62 +594,117 @@ def _items_coresa(tables, text):
         price_context='price',   # USD usa coma decimal
     )
 
-    # Fallback texto — formato real Coresa (USD, descripción multi-línea):
-    #   001 MILAN-2CN-B TECLA MILAN BLANCO... USD 3,44 50 50% USD 1,72 10,50 USD 86,00
-    #       250V, 10A MAX. BASTIDOR METALICO          ← continuación de descripción
-    # Orden de columnas en datos:
-    #   item | código | descripción | PrecioUnit | Cant | Desc% | PrecioC/Desc | IVA% | Subtotal
+    # Fallback texto — Coresa USD con descripción multi-línea. Dos formatos:
+    #
+    # FORMATO FACTURA AFIP:
+    #   item código descripción | Cant | USD PrecioUnit | Bon% | USD Pr.C/Dto | IVA% | USD SubTotal
+    #   0 P48-605-PMMA-4800 PANEL PRO... 60 USD 60,550 50.00% USD 30,275 21.0% USD 1.816,50
+    #     LM-CW 4800LM AC100-260V...                ← continuación de descripción
+    #
+    # FORMATO ORDEN DE VENTA:
+    #   item código descripción | USD PrecioUnit | Cant | Desc% | USD Pr.C/Dto | IVA% | USD SubTotal
+    #   001 MILAN-2CN-B TECLA MILAN... USD 3,44 50 50% USD 1,72 10,50 USD 86,00
     if not items:
         lines = text.split('\n')
         in_table = False
 
-        # Regex de fila de ítem (USD como ancla fuerte para separar desc de precios)
-        ITEM_RE = re.compile(
+        # Formato FACTURA: Cant ANTES del precio
+        RE_FACTURA = re.compile(
+            r'^(\d{1,4})\s+'                 # item
+            r'(.+?)\s+'                       # código + descripción (se separan luego)
+            r'(\d+(?:[.,]\d+)?)\s+'          # cantidad
+            r'USD\s*([\d.,]+)\s+'            # precio unitario
+            r'([\d.,]+)\s*%\s+'              # bonificación %
+            r'USD\s*([\d.,]+)\s+'            # precio c/dto
+            r'([\d.,]+)\s*%\s+'              # IVA %
+            r'USD\s*([\d.,]+)$',             # subtotal s/IVA
+            re.IGNORECASE
+        )
+        # Formato ORDEN DE VENTA: Cant DESPUÉS del precio
+        RE_OV = re.compile(
             r'^(\d{1,4})\s+'                 # item
             r'([A-Z0-9][A-Z0-9\-/.]*)\s+'    # código
-            r'(.+?)\s+'                       # descripción (lazy)
-            r'USD\s*([\d.,]+)\s+'             # precio unit
+            r'(.+?)\s+'                       # descripción
+            r'USD\s*([\d.,]+)\s+'            # precio unitario
             r'(\d+(?:[.,]\d+)?)\s+'          # cantidad
             r'([\d.,]+)\s*%\s+'              # descuento %
             r'USD\s*([\d.,]+)\s+'            # precio c/desc
-            r'([\d.,]+)\s+'                   # iva %
+            r'([\d.,]+)\s*%?\s+'             # IVA %
             r'USD\s*([\d.,]+)$',             # subtotal s/iva
             re.IGNORECASE
         )
 
+        def _split_cod_desc(blob):
+            """Separa 'P48-605 PANEL PRO...' → ('P48-605', 'PANEL PRO...')."""
+            parts = blob.strip().split(None, 1)
+            if len(parts) == 2:
+                return parts[0], parts[1].strip()
+            return blob.strip(), ''
+
+        def _ncor(s):
+            """Número Coresa: la coma SIEMPRE es decimal (ej '60,550'=60.55, '1.816,50'=1816.50)."""
+            s = re.sub(r'[USD$%\s]', '', str(s)).strip()
+            if not s or s == '-':
+                return 0.0
+            if '.' in s and ',' in s:        # 1.816,50 → punto miles, coma decimal
+                return float(s.replace('.', '').replace(',', '.'))
+            if ',' in s:                      # 60,550 → coma decimal
+                return float(s.replace(',', '.'))
+            try:
+                return float(s)
+            except ValueError:
+                return 0.0
+
         for line in lines:
-            # Encabezado: "Item Código Descripción Cant Desc IVA" (puede venir partido)
+            lu = line.upper()
+            # Encabezado robusto (tolerante a codificación rara): tiene DESCRIPCI + CANT
             if not in_table:
-                if (re.search(r'C[oó]digo\s+Descripci[oó]n', line, re.IGNORECASE)
-                        or re.search(r'Descripci[oó]n\s+Cant', line, re.IGNORECASE)):
+                if 'DESCRIPCI' in lu and 'CANT' in lu:
                     in_table = True
                 continue
 
-            if re.match(r'\s*(Subtotal|TOTAL|Son\s+Pesos|Para la cancelaci|'
-                        r'Neto\s+Gravado|CAE)', line, re.IGNORECASE):
+            if re.match(r'\s*(Subtotal|TOTAL|Son\s+Pesos|Para\s+la\s+cancelaci|'
+                        r'Neto\s+Gravado|CAE|Esta\s+factura|Saldo\s+en)',
+                        line, re.IGNORECASE):
                 break
 
             stripped = line.strip()
             if not stripped:
                 continue
 
-            m = ITEM_RE.match(stripped)
+            m = RE_FACTURA.match(stripped)
             if m:
-                precio_unit = _parse_num(m.group(4))
-                precio_neto = _parse_num(m.group(7))
+                sku, desc = _split_cod_desc(m.group(2))
+                items.append({
+                    'sku':              sku,
+                    'descripcion':      desc,
+                    'cantidad':         _ncor(m.group(3)),
+                    'precio_unit':      _ncor(m.group(4)),
+                    'descuento_pct':    _ncor(m.group(5)),
+                    'precio_neto_unit': _ncor(m.group(6)),
+                    'iva_pct':          _ncor(m.group(7)),
+                    'subtotal_siva':    _ncor(m.group(8)),
+                    'moneda':           'USD',
+                })
+                continue
+
+            m = RE_OV.match(stripped)
+            if m:
                 items.append({
                     'sku':              m.group(2),
                     'descripcion':      m.group(3).strip(),
-                    'cantidad':         _parse_num(m.group(5), context='qty'),
-                    'precio_unit':      precio_unit,
-                    'descuento_pct':    _parse_num(m.group(6)),
-                    'precio_neto_unit': precio_neto,
-                    'iva_pct':          _parse_num(m.group(8)),
-                    'subtotal_siva':    _parse_num(m.group(9)),
+                    'cantidad':         _ncor(m.group(5)),
+                    'precio_unit':      _ncor(m.group(4)),
+                    'descuento_pct':    _ncor(m.group(6)),
+                    'precio_neto_unit': _ncor(m.group(7)),
+                    'iva_pct':          _ncor(m.group(8)),
+                    'subtotal_siva':    _ncor(m.group(9)),
                     'moneda':           'USD',
                 })
-            elif items and not re.search(r'USD', stripped):
-                # Línea de continuación → se suma a la descripción del último ítem
+                continue
+
+            # Línea de continuación → se suma a la descripción del último ítem
+            if items and 'USD' not in stripped:
                 items[-1]['descripcion'] += ' ' + stripped
 
     return items
