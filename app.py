@@ -7,11 +7,18 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+import importlib
 import database as db
 import extractor
 
+# Forzar recarga del código desde disco en cada ejecución.
+# Streamlit cachea los módulos importados; sin esto, los cambios de
+# extractor.py / database.py no se aplican hasta reiniciar el servidor.
+importlib.reload(extractor)
+importlib.reload(db)
+
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.03-a"
+APP_VERSION = "2026.06.03-b"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
