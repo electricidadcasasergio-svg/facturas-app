@@ -19,7 +19,7 @@ importlib.reload(extractor)
 importlib.reload(db)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.03-k"
+APP_VERSION = "2026.06.03-l"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -876,48 +876,62 @@ elif page == "🔍 SKUs":
     )
 
     st.divider()
-    sku_sel = st.selectbox(
-        "Ver evolución de precio para:",
+    _desc_por_sku = {r['sku']: r['descripcion'] for r in resultados}
+    skus_sel = st.multiselect(
+        "Elegí uno o varios artículos para ver la evolución de precio:",
         [r['sku'] for r in resultados],
-        format_func=lambda s: f"{s}  —  "
-            + next((r['descripcion'] for r in resultados if r['sku'] == s), ''),
+        format_func=lambda s: f"{s}  —  {_desc_por_sku.get(s, '')}",
     )
 
-    if sku_sel:
-        det = db.get_items_by_sku(sku_sel, prov_map[prov_sel])
-        if not det:
-            st.info("Sin datos de compra para este SKU.")
+    if skus_sel:
+        # Recolectar el historial de cada SKU elegido
+        frames = []
+        for sku in skus_sel:
+            det = db.get_items_by_sku(sku, prov_id_sku)
+            if det:
+                dft = pd.DataFrame(det)
+                dft['sku'] = sku
+                frames.append(dft)
+
+        if not frames:
+            st.info("Sin datos de compra para los artículos elegidos.")
             st.stop()
 
-        df_det = pd.DataFrame(det)
-        moneda = df_det['moneda'].iloc[0] if 'moneda' in df_det.columns else 'ARS'
+        df_all = pd.concat(frames, ignore_index=True)
+        moneda = df_all['moneda'].iloc[0] if 'moneda' in df_all.columns else 'ARS'
 
-        # Gráfico evolución precio neto
+        # Gráfico: una línea por artículo
         fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=df_det['fecha_display'],
-            y=df_det['precio_neto_unit'],
-            mode='lines+markers',
-            name='Precio neto/u',
-            line=dict(color='#1558a7', width=2),
-            marker=dict(size=7),
-        ))
+        for sku in skus_sel:
+            d = df_all[df_all['sku'] == sku].sort_values('fecha')
+            if d.empty:
+                continue
+            etiqueta = f"{sku} — {_desc_por_sku.get(sku, '')[:30]}"
+            fig.add_trace(go.Scatter(
+                x=d['fecha_display'],
+                y=d['precio_neto_unit'],
+                mode='lines+markers',
+                name=etiqueta,
+                marker=dict(size=7),
+            ))
         fig.update_layout(
-            title=f"Evolución precio neto — {sku_sel}",
+            title="Evolución de precio neto por artículo",
             xaxis_title='Fecha',
             yaxis_title=f'Precio neto unitario ({moneda})',
             hovermode='x unified',
+            legend=dict(orientation='h', yanchor='bottom', y=-0.4),
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        # Tabla historial
+        # Tabla historial combinada
         cols_show = [c for c in
-            ['factura_numero', 'fecha_display', 'proveedor_nombre',
+            ['sku', 'factura_numero', 'fecha_display', 'proveedor_nombre',
              'cantidad', 'precio_unit', 'descuento_pct',
              'precio_neto_unit', 'iva_pct', 'subtotal_siva']
-            if c in df_det.columns]
+            if c in df_all.columns]
         st.dataframe(
-            df_det[cols_show].rename(columns={
+            df_all[cols_show].rename(columns={
+                'sku':             'Código',
                 'factura_numero':  'Factura',
                 'fecha_display':   'Fecha',
                 'proveedor_nombre':'Proveedor',
@@ -931,6 +945,8 @@ elif page == "🔍 SKUs":
             use_container_width=True,
             hide_index=True,
         )
+    else:
+        st.caption("👆 Seleccioná artículos arriba para ver y comparar su evolución de precio.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
