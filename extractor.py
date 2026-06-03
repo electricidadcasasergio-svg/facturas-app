@@ -55,6 +55,15 @@ def _parse_num(s, context='price'):
         return 0.0
 
 
+# ── CUITs propios de Casa Sergio (nunca son el proveedor) ────────────────────
+# Si alguno de estos aparece en la factura, es el COMPRADOR, no el vendedor.
+# El primer CUIT que NO esté en este set es el proveedor.
+_OWN_CUITS = {
+    '20-14018158-8',   # Milne Sergio Gustavo (persona física)
+    '30-71662001-4',   # Electro Casa Sergio SRL
+}
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'}
@@ -249,17 +258,21 @@ def _parse_header(text, filename):
             h['fecha'] = m.group(1)
             break
 
-    # CUITs — usar primero la sección del proveedor para evitar tomar el CUIT del comprador
-    cuits = re.findall(r'(\d{2}-\d{8}-\d)', sup_text)
-    if not cuits:
-        cuits = re.findall(r'(\d{2}-\d{8}-\d)', text)
-    if not cuits:
-        raw = re.findall(r'\b(\d{11})\b', sup_text)
-        if raw:
-            c = raw[0]
-            cuits = [f'{c[:2]}-{c[2:10]}-{c[10]}']
-    if cuits:
-        h['proveedor_cuit'] = cuits[0]
+    # CUITs — excluir los CUITs propios de Casa Sergio; el primero restante es el proveedor
+    def _prov_cuits_from(src):
+        found = re.findall(r'(\d{2}-\d{8}-\d)', src)
+        return [c for c in found if c not in _OWN_CUITS]
+
+    prov_cuits = _prov_cuits_from(text)   # buscar en TODO el texto
+    if not prov_cuits:
+        # Fallback OCR: 11 dígitos sin guiones
+        for raw in re.findall(r'\b(\d{11})\b', text):
+            norm = f'{raw[:2]}-{raw[2:10]}-{raw[10]}'
+            if norm not in _OWN_CUITS:
+                prov_cuits = [norm]
+                break
+    if prov_cuits:
+        h['proveedor_cuit'] = prov_cuits[0]
 
     # Razón social del proveedor — varios intentos en orden de confianza
     _nombres_por_cuit = {
