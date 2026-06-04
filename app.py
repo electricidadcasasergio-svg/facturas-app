@@ -21,7 +21,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-f"
+APP_VERSION = "2026.06.04-g"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -572,7 +572,24 @@ cuentas = [
                 f"**Fecha:** {correo['fecha']}  ·  📥 {correo['cuenta']}"
             )
             for ai, (fn, datos) in enumerate(correo['adjuntos']):
-                st.markdown(f"📎 `{fn}`")
+                vc1, vc2 = st.columns([3, 1])
+                vc1.markdown(f"📎 `{fn}`")
+                vc2.download_button("⬇️ Descargar", datos, file_name=fn,
+                                    key=f"dl_mail_{ci}_{ai}")
+                ext = Path(fn).suffix.lower()
+                with st.expander("👁️ Ver archivo adjunto"):
+                    if ext in ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'):
+                        st.image(datos, use_container_width=True)
+                    elif ext == '.pdf':
+                        b64 = base64.b64encode(datos).decode()
+                        st.markdown(
+                            f'<iframe src="data:application/pdf;base64,{b64}" '
+                            f'width="100%" height="600" style="border:1px solid #d8e5f5;border-radius:8px;"></iframe>',
+                            unsafe_allow_html=True,
+                        )
+                        st.caption("Si no se ve, usá el botón Descargar.")
+                    else:
+                        st.info("Vista previa no disponible para este tipo de archivo.")
                 procesar_comprobante(fn, datos,
                                      key_prefix=f"mail_{ci}_{ai}", expandido=False)
 
