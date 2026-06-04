@@ -21,7 +21,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-j"
+APP_VERSION = "2026.06.04-k"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 

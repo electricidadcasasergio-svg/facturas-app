@@ -485,51 +485,58 @@ def _parse_header(text, filename):
     if m:
         h['cae'] = m.group(1)
 
-    # Totales del pie
-    # Subtotal: 1) mismo línea con número contiguo
-    m = re.search(r'\bSUBTOTAL\b[^\S\n]+([\d.,]+)', text, re.IGNORECASE)
-    if not m:
-        # 2) línea de totales (contiene GRAVADO/PARCIAL/IMPORTE antes de SUBTOTAL)
-        #    los números están en la línea siguiente
-        m = re.search(
-            r'(?:GRAVADO|PARCIAL|IMPORTE)[^\n]*\bSUBTOTAL\b[^\n]*\n\s*([\d.,]+)',
-            text, re.IGNORECASE
-        )
-    if not m:
-        # 3) "Subtotal: USD 2.093,62" / "Subtotal: 500.00"
-        m = re.search(r'\bSubtotal\b\s*:?\s*(?:USD\s*)?\$?\s*([\d.,]+)', text, re.IGNORECASE)
-    if m:
-        h['subtotal'] = _parse_num(m.group(1))
+    # ── Pie tipo "tabla": etiquetas en una línea, valores en la siguiente ──────
+    # Ej (BAW): "Subtotal Impuestos IVA % 21,00 IVA 10,5% TOTAL"
+    #           "745.193,23 37.259,66 156.490,58 0,00 938.943,47"
+    mlab = re.search(
+        r'(\bSubtotal\b[^\n]*\bTOTAL\b[^\n]*)\n\s*([\d.,]+(?:[^\S\n]+[\d.,]+){1,5})',
+        text, re.IGNORECASE
+    )
+    if mlab:
+        etiquetas = mlab.group(1)
+        nums = [_parse_num(n) for n in re.findall(r'[\d.,]+', mlab.group(2))]
+        if len(nums) >= 2:
+            h['subtotal'] = nums[0]
+            h['total']    = nums[-1]
+            medio = nums[1:-1]
+            tiene_imp = bool(re.search(r'Impuesto|Percep', etiquetas, re.IGNORECASE))
+            if tiene_imp and medio:
+                h['percepciones'] = medio[0]
+                medio = medio[1:]
+            if len(medio) >= 1:
+                h['iva_21'] = medio[0]
+            if len(medio) >= 2:
+                h['iva_105'] = medio[1]
+
+    # Totales del pie (solo completar lo que el pie-tabla no haya resuelto)
     if not h.get('subtotal'):
-        # "Neto Gravado: $ 1,804.44" (Melectric y similares)
-        m = re.search(r'Neto\s+Gravado\s*:\s*\$?\s*([\d.,]+)', text, re.IGNORECASE)
+        m = (re.search(r'\bSUBTOTAL\b[^\S\n]+([\d.,]+)', text, re.IGNORECASE)
+             or re.search(r'(?:GRAVADO|PARCIAL|IMPORTE)[^\n]*\bSUBTOTAL\b[^\n]*\n\s*([\d.,]+)', text, re.IGNORECASE)
+             or re.search(r'\bSubtotal\b\s*:?\s*(?:USD\s*)?\$?\s*([\d.,]+)', text, re.IGNORECASE)
+             or re.search(r'Neto\s+Gravado\s*:\s*\$?\s*([\d.,]+)', text, re.IGNORECASE)
+             or re.search(r'\bBRUTO\b[^\d$\n]*\$?\s*([\d.,]+)', text, re.IGNORECASE))
         if m:
             h['subtotal'] = _parse_num(m.group(1))
-    if not h.get('subtotal'):
-        # "BRUTO $1,816,100.00" (Interelec y similares)
-        m = re.search(r'\bBRUTO\b[^\d$\n]*\$?\s*([\d.,]+)', text, re.IGNORECASE)
+
+    if not h.get('iva_21'):
+        m = re.search(r'IVA[\s_]*21[%,°]?\s*[:\$]?\s*(?:USD\s*)?([\d.,]+)', text, re.IGNORECASE)
         if m:
-            h['subtotal'] = _parse_num(m.group(1))
+            h['iva_21'] = _parse_num(m.group(1))
 
-    # IVA 21% — tolerar "_", ":", "$" y "USD" entre etiqueta y número
-    m = re.search(r'IVA[\s_]*21[%,°]?\s*[:\$]?\s*(?:USD\s*)?([\d.,]+)', text, re.IGNORECASE)
-    if m:
-        h['iva_21'] = _parse_num(m.group(1))
+    if not h.get('iva_105'):
+        m = re.search(r'IVA[\s_]*10[,.]?5[%,°]?\s*[:\$]?\s*(?:USD\s*)?([\d.,]+)', text, re.IGNORECASE)
+        if m:
+            h['iva_105'] = _parse_num(m.group(1))
 
-    # IVA 10.5% — igual tolerancia
-    m = re.search(r'IVA[\s_]*10[,.]?5[%,°]?\s*[:\$]?\s*(?:USD\s*)?([\d.,]+)', text, re.IGNORECASE)
-    if m:
-        h['iva_105'] = _parse_num(m.group(1))
+    if not h.get('percepciones'):
+        m = re.search(r'Percepc?i[oó]n\b[^\n\d]+([\d.,]+)', text, re.IGNORECASE)
+        if m:
+            h['percepciones'] = _parse_num(m.group(1))
 
-    # Percepciones — "Percepción IIBB: 90.22"
-    m = re.search(r'Percepc?i[oó]n\b[^\n\d]+([\d.,]+)', text, re.IGNORECASE)
-    if m:
-        h['percepciones'] = _parse_num(m.group(1))
-
-    # Total — excluir SUBTOTAL (lookbehind); número en la MISMA línea (no cruzar \n)
-    totales = re.findall(r'(?<![A-Za-z])TOTAL\b[^\d\n$]*\$?[^\S\n]*([\d.,]+)', text, re.IGNORECASE)
-    if totales:
-        h['total'] = max((_parse_num(t) for t in totales), default=0)
+    if not h.get('total'):
+        totales = re.findall(r'(?<![A-Za-z])TOTAL\b[^\d\n$]*\$?[^\S\n]*([\d.,]+)', text, re.IGNORECASE)
+        if totales:
+            h['total'] = max((_parse_num(t) for t in totales), default=0)
 
     # Fallback de total: el monto más grande del documento.
     # Solo considera números con decimales (.XX o ,XX) → descarta O.C, CAE, CUIT.
