@@ -96,61 +96,103 @@ def extract_invoice(pdf_path, config=None):
     return _extract_from_pdf(path, config=config)
 
 
-def _extract_from_image(path):
-    """OCR sobre foto de factura. Requiere pytesseract + Tesseract instalado."""
-    try:
-        import pytesseract
-        from PIL import Image, ImageFilter, ImageEnhance
-    except ImportError:
-        raise RuntimeError(
-            "Para procesar imágenes instalá pytesseract:\n"
-            "  py -m pip install pytesseract pillow\n"
-            "Y Tesseract OCR para Windows:\n"
-            "  https://github.com/UB-Mannheim/tesseract/wiki"
-        )
-
-    # Apuntar al binario de Tesseract (instalado pero no en PATH)
-    import os
-    tess_paths = [
-        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-    ]
-    for tp in tess_paths:
+def _set_tesseract():
+    """Apunta pytesseract al binario instalado (no está en PATH)."""
+    import os, pytesseract
+    for tp in [r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+               r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe']:
         if os.path.exists(tp):
             pytesseract.pytesseract.tesseract_cmd = tp
             break
+    return pytesseract
 
-    img = Image.open(path)
 
-    # Preprocesado: grises → upscale → contraste → sharpening
+def _ocr_image(img):
+    """Corre OCR sobre una imagen PIL ya preprocesada y devuelve el texto."""
+    pytesseract = _set_tesseract()
+    cfg = r'--oem 3 --psm 6'
+    try:
+        return pytesseract.image_to_string(img, lang='spa', config=cfg)
+    except Exception:
+        return pytesseract.image_to_string(img, config=cfg)
+
+
+def _preprocesar(img):
+    """grises → upscale a ~4000px → contraste → nitidez."""
+    from PIL import Image, ImageEnhance
     img = img.convert('L')
     w, h = img.size
-    # Tesseract funciona mejor con ~300 DPI; las fotos de WhatsApp suelen ser 96 DPI
-    # Escalamos para que el lado más largo llegue a ~4000px
     scale = max(1, int(4000 / max(w, h)))
     if scale > 1:
         img = img.resize((w * scale, h * scale), Image.LANCZOS)
     img = ImageEnhance.Contrast(img).enhance(2.0)
     img = ImageEnhance.Sharpness(img).enhance(2.0)
+    return img
 
-    cfg = r'--oem 3 --psm 6'
+
+def _extract_from_image(path):
+    """OCR sobre foto de factura. Requiere pytesseract + Tesseract instalado."""
     try:
-        text = pytesseract.image_to_string(img, lang='spa', config=cfg)
-    except Exception:
-        # Fallback: idioma inglés si no está instalado el paquete español
-        text = pytesseract.image_to_string(img, config=cfg)
+        from PIL import Image
+    except ImportError:
+        raise RuntimeError(
+            "Para procesar imágenes instalá pytesseract y pillow, "
+            "y Tesseract OCR para Windows."
+        )
+    img = _preprocesar(Image.open(path))
+    return _parse_full(_ocr_image(img), path.name)
 
-    return _parse_full(text, path.name)
+
+def _texto_degradado(texto):
+    """
+    Detecta PDFs con texto 'roto' (espacios entre letras, ej: 'RI EL DI N').
+    True si una proporción alta de tokens son de 1-2 caracteres.
+    """
+    tokens = [t for t in texto.split() if t.isalpha()]
+    if len(tokens) < 30:
+        return False
+    cortos = sum(1 for t in tokens if len(t) <= 2)
+    return cortos / len(tokens) > 0.45
+
+
+def _colapsar_espacios_numeros(texto):
+    """Une separadores con espacios dentro de números: '615, 750. 30' → '615,750.30',
+    '00002- 00004708' → '00002-00004708'."""
+    t = re.sub(r'(?<=\d)\s*([.,])\s*(?=\d)', r'\1', texto)   # "615, 750. 30" → "615,750.30"
+    t = re.sub(r'(?<=\w)\s*-\s*(?=\w)', '-', t)              # "7050- T- 220" → "7050-T-220"
+    return t
+
+
+def _ocr_pdf(path):
+    """Renderiza cada página del PDF a imagen y la pasa por OCR. Devuelve el texto."""
+    textos = []
+    with pdfplumber.open(path) as pdf:
+        for pg in pdf.pages:
+            try:
+                img = pg.to_image(resolution=300).original
+                textos.append(_ocr_image(_preprocesar(img)))
+            except Exception:
+                continue
+    return _colapsar_espacios_numeros('\n'.join(textos))
 
 
 def _extract_from_pdf(path, config=None):
-    """Extracción estándar desde PDF con pdfplumber."""
+    """Extracción estándar desde PDF con pdfplumber; si el texto está roto, usa OCR."""
     with pdfplumber.open(path) as pdf:
         pages_text   = [p.extract_text() or '' for p in pdf.pages]
         pages_tables = [p.extract_tables() or [] for p in pdf.pages]
 
     full_text  = '\n'.join(pages_text)
     all_tables = [t for page in pages_tables for t in page]
+
+    # Si el texto del PDF está degradado (espacios entre letras), reintentar con OCR
+    if _texto_degradado(full_text):
+        try:
+            ocr_text = _ocr_pdf(path)
+            if ocr_text and not _texto_degradado(ocr_text):
+                return _parse_full(ocr_text, path.name, config=config)
+        except Exception:
+            pass
 
     return _parse_full(full_text, path.name, all_tables, config=config)
 
@@ -257,6 +299,7 @@ def _parse_header(text, filename):
     # Número de factura — varios formatos posibles
     for pat in [
         r'\b([A-Z]-\d{5}-\d{8})\b',                     # A-00005-00237314 (BAW, etc.) — limpio
+        r'\b([A-Z]?\d{5}-\d{8})\b',                     # A00002-00004708 / 00002-00004708 (BUHO)
         r'N[°º]?\s*:?\s*([A-Z]-\d{5}-\d{8})',          # A-00005-00235741
         r'N[°º]\s*:\s*(\d{5}-\d{6,8})',                  # 00004-00246028
         r'Factura\s+N[°º]?:?\s*(\d{4}-\d{5,8})',         # 0006-00139834
@@ -272,8 +315,9 @@ def _parse_header(text, filename):
             break
 
     # Fecha (DD/MM/YYYY o DD/MM/YY) — buscar en todo el texto
+    # Excluir fechas de "Inicio de Actividades" / "Vencimiento" (no son la fecha de la factura)
     for pat in [
-        r'(?:Fecha[^\n:]*:|FECHA:)\s*(\d{2}/\d{2}/\d{4})',
+        r'(?:Fecha(?!\s*(?:de\s+)?(?:Inicio|Vto|Venc))[^\n:]*:|FECHA:)\s*(\d{2}/\d{2}/\d{4})',
         r'(?:Fecha\s+emisi[oó]n:?\s*)(\d{2}/\d{2}/\d{4})',
         r'\bFecha:\s*(\d{2}/\d{2}/\d{4})',
         r'\bFecha:\s*(\d{2}/\d{2}/\d{2})(?!\d)',          # Fecha: 03/06/26 (año 2 dígitos)
@@ -330,6 +374,7 @@ def _parse_header(text, filename):
         '20147728272':   'PRIOLO DANIEL ROBERTO',
         '30-50194898-1': 'CAMBRE I.C. y F.S.A.',
         '30-61406102-9': 'FABRICA ARGENTINA DE CONDUCTORES BIMETALICOS S.A.',
+        '30-70900997-0': 'BUHO ELECTROMECANICA S.A.',
     }
     for cuit_known, nombre_known in _nombres_por_cuit.items():
         if cuit_known in text:
@@ -1146,7 +1191,8 @@ def _items_generic_text(text, header_hint=None, discovered=None):
     # Pie de factura → parar
     FOOTER = re.compile(
         r'^\s*(?:SUB[\s-]?TOTAL|TOTAL\b|I\.?V\.?A\.?\b|PERCEP|C\.?A\.?E\.?\b|'
-        r'Son\s+pesos|BONIF|CHEQUES|CONDICI[OÓ]N\s+DE\s+VENTA|VENCIM)',
+        r'Son\s+pesos|BONIF|CHEQUES|CONDICI[OÓ]N\s+DE\s+VENTA|VENCIM|'
+        r'Datos\s+Bancari|BANCO\b|CBU\b|Alias\b|Dep[oó]sito)',
         re.IGNORECASE
     )
 
@@ -1263,6 +1309,10 @@ def _items_generic_text(text, header_hint=None, discovered=None):
             precio_unit = subtotal
 
         if subtotal == 0 and precio_unit == 0:
+            continue
+
+        # Descartar filas con valores absurdos (basura de OCR: CBU, CAE, etc.)
+        if subtotal > 1e10 or precio_unit > 1e10:
             continue
 
         # Cantidad (tokens numéricos antes del SKU, saltar ordinal)
