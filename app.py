@@ -22,7 +22,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-o"
+APP_VERSION = "2026.06.04-p"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -47,9 +47,10 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 header[data-testid="stHeader"] { background: transparent !important; }
 [data-testid="stToolbar"] { display: none !important; }
 /* Asegurar que el control para reabrir la barra lateral siempre se vea */
+[data-testid="stExpandSidebarButton"],
 [data-testid="stSidebarCollapsedControl"],
 [data-testid="collapsedControl"] {
-    display: block !important;
+    display: flex !important;
     visibility: visible !important;
     z-index: 999999 !important;
 }
@@ -159,31 +160,53 @@ div[data-baseweb="input"] > div {
 # (garantía por si la flecha nativa de Streamlit no aparece en alguna versión)
 components.html("""
 <script>
-const d = window.parent.document;
-if (!d.getElementById('btn-toggle-sidebar')) {
-    const b = d.createElement('button');
-    b.id = 'btn-toggle-sidebar';
-    b.innerHTML = '☰';
-    b.title = 'Mostrar/ocultar menú';
-    b.style.cssText = 'position:fixed;top:10px;left:10px;z-index:1000000;' +
-        'background:#1558a7;color:#fff;border:none;border-radius:10px;' +
-        'width:42px;height:42px;font-size:20px;cursor:pointer;' +
-        'box-shadow:0 3px 10px rgba(0,0,0,.25);';
-    b.onclick = function() {
-        const sb = d.querySelector('section[data-testid="stSidebar"]');
-        const abierto = sb && sb.offsetWidth > 50;
-        const expandir = d.querySelector(
-            '[data-testid="stSidebarCollapsedControl"] button,' +
-            '[data-testid="collapsedControl"] button');
-        const colapsar = d.querySelector(
-            '[data-testid="stSidebarCollapseButton"] button,' +
-            '[data-testid="stSidebarCollapseButton"]');
-        if (abierto && colapsar) { colapsar.click(); }
-        else if (expandir) { expandir.click(); }
-        else if (colapsar) { colapsar.click(); }
-    };
-    d.body.appendChild(b);
-}
+(function () {
+    function init() {
+        var d;
+        try { d = window.parent.document; } catch (e) { return; }
+        if (!d || !d.body) { return setTimeout(init, 300); }
+        if (d.getElementById('btn-toggle-sidebar')) { return; }
+
+        var b = d.createElement('button');
+        b.id = 'btn-toggle-sidebar';
+        b.innerHTML = '☰';
+        b.title = 'Mostrar/ocultar menú';
+        b.style.cssText = 'position:fixed;top:10px;left:10px;z-index:2147483647;' +
+            'background:#1558a7;color:#fff;border:none;border-radius:10px;' +
+            'width:44px;height:44px;font-size:22px;cursor:pointer;' +
+            'box-shadow:0 3px 10px rgba(0,0,0,.25);';
+
+        function pick(sels) {
+            for (var i = 0; i < sels.length; i++) {
+                var el = d.querySelector(sels[i]);
+                if (el) return el;
+            }
+            return null;
+        }
+        b.onclick = function () {
+            var sb = d.querySelector('section[data-testid="stSidebar"]');
+            var abierto = sb && sb.offsetWidth > 60;
+            var colapsar = pick([
+                '[data-testid="stSidebarCollapseButton"] button',
+                '[data-testid="stSidebarCollapseButton"]',
+                'button[aria-label="Close sidebar"]',
+                'button[aria-label*="ollapse"]'
+            ]);
+            var expandir = pick([
+                '[data-testid="stExpandSidebarButton"] button',
+                '[data-testid="stExpandSidebarButton"]',
+                '[data-testid="stSidebarCollapsedControl"] button',
+                '[data-testid="collapsedControl"] button',
+                'button[aria-label="Open sidebar"]',
+                'button[aria-label*="xpand"]'
+            ]);
+            if (abierto) { (colapsar || expandir) && (colapsar || expandir).click(); }
+            else { (expandir || colapsar) && (expandir || colapsar).click(); }
+        };
+        d.body.appendChild(b);
+    }
+    init();
+})();
 </script>
 """, height=0)
 
