@@ -11,15 +11,17 @@ import streamlit as st
 import importlib
 import database as db
 import extractor
+import email_facturas
 
 # Forzar recarga del código desde disco en cada ejecución.
 # Streamlit cachea los módulos importados; sin esto, los cambios de
 # extractor.py / database.py no se aplican hasta reiniciar el servidor.
 importlib.reload(extractor)
 importlib.reload(db)
+importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.03-l"
+APP_VERSION = "2026.06.04-a"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -166,6 +168,167 @@ def _page_header(icon: str, title: str, subtitle: str = ""):
     """, unsafe_allow_html=True)
 
 
+# ── Procesar y guardar un comprobante (reutilizable: subir y bandeja mail) ────
+
+_ITEM_COLS = ['sku', 'descripcion', 'cantidad', 'precio_unit',
+              'descuento_pct', 'precio_neto_unit', 'iva_pct', 'subtotal_siva']
+_TIPO_LABEL = {'FC': 'Factura', 'ND': 'Nota de Débito', 'NC': 'Nota de Crédito'}
+
+
+def procesar_comprobante(nombre, datos_bytes, key_prefix, expandido=True):
+    """Procesa un PDF/imagen (bytes), muestra la previsualización editable y permite guardar."""
+    suffix = Path(nombre).suffix.lower()
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(datos_bytes)
+        tmp_path = tmp.name
+
+    try:
+        cuit_hint = extractor.quick_get_cuit(tmp_path)
+    except AttributeError:
+        cuit_hint = None
+    proveedor_config = db.get_proveedor_config(cuit_hint) if cuit_hint else None
+    nombre_guardado  = (db.get_proveedor_nombre_por_cuit(cuit_hint)
+                        if cuit_hint and hasattr(db, 'get_proveedor_nombre_por_cuit')
+                        else None)
+
+    with st.spinner(f"Procesando **{nombre}**…"):
+        try:
+            data = extractor.extract_invoice(tmp_path, config=proveedor_config)
+            data['archivo_nombre'] = nombre
+            error = None
+        except Exception as e:
+            data, error = None, str(e)
+    Path(tmp_path).unlink(missing_ok=True)
+
+    if error:
+        st.error(f"❌ **{nombre}**: {error}")
+        return
+
+    items    = data.get('items', [])
+    tipo_doc = data.get('tipo', 'FC')
+    label = (
+        f"✅ {nombre}  —  {_TIPO_LABEL.get(tipo_doc, 'Factura')}  |  "
+        f"{data.get('proveedor_nombre','?')}  |  {data.get('numero','?')}  |  "
+        f"{data.get('fecha','?')}"
+    )
+
+    with st.expander(label, expanded=expandido):
+        ya = None
+        if hasattr(db, 'factura_ya_cargada'):
+            ya = db.factura_ya_cargada(data.get('proveedor_cuit', ''),
+                                       data.get('numero', ''), tipo_doc)
+        if ya:
+            st.error(f"🔁 **Este comprobante YA está cargado.** Número {ya['numero']} — "
+                     f"total ${ya.get('total', 0):,.2f}. No hace falta volver a subirlo.")
+
+        if tipo_doc == 'NC':
+            st.info("🟦 **Nota de Crédito** — se RESTARÁ del saldo del proveedor.")
+        elif tipo_doc == 'ND':
+            st.info("🟧 **Nota de Débito** — se SUMARÁ al saldo del proveedor.")
+
+        if data.get('es_venta'):
+            st.error("🛑 **Parece una factura de VENTA emitida por Casa Sergio**, no una compra. "
+                     "Revisá antes de guardar.")
+
+        if proveedor_config:
+            st.success("✅ Proveedor conocido — se usó perfil guardado.")
+
+        st.markdown("#### Datos del encabezado")
+        st.caption("Revisá y corregí si algo no se detectó bien.")
+
+        c1, c2 = st.columns(2)
+        if data.get('proveedor_nombre_fiable'):
+            nombre_det = data.get('proveedor_nombre', '')
+        else:
+            nombre_det = nombre_guardado or data.get('proveedor_nombre', '')
+        cuit_det   = data.get('proveedor_cuit', '')
+        numero_det = data.get('numero', '')
+        fecha_det  = data.get('fecha', date.today().strftime('%d/%m/%Y'))
+        moneda_det = data.get('moneda', 'ARS')
+        tc_det     = data.get('tipo_cambio', 1.0)
+
+        prov_nombre = c1.text_input("Proveedor" + (" ⚠️ no detectado" if not nombre_det else ""),
+                                    value=nombre_det, key=f"nombre_{key_prefix}")
+        prov_cuit   = c1.text_input("CUIT" + (" ⚠️ no detectado" if not cuit_det else ""),
+                                    value=cuit_det, key=f"cuit_{key_prefix}")
+        fac_numero  = c2.text_input("Número de factura" + (" ⚠️ no detectado" if not numero_det else ""),
+                                    value=numero_det, key=f"nro_{key_prefix}")
+        fac_fecha   = c2.text_input("Fecha (DD/MM/AAAA)", value=fecha_det, key=f"fecha_{key_prefix}")
+
+        c3, c4 = st.columns(2)
+        moneda = c3.selectbox("Moneda", ['ARS', 'USD'], index=0 if moneda_det == 'ARS' else 1,
+                              key=f"moneda_{key_prefix}")
+        tc = c4.number_input("Tipo de cambio (ARS/USD)", value=float(tc_det), min_value=1.0,
+                             key=f"tc_{key_prefix}") if moneda == 'USD' else 1.0
+
+        st.markdown("#### Ítems")
+        if not items:
+            st.warning("⚠️ No se encontraron ítems automáticamente. Podés agregarlos en la tabla.")
+
+        df_items = (pd.DataFrame(items).reindex(columns=_ITEM_COLS)
+                    if items else pd.DataFrame(columns=_ITEM_COLS))
+        for col, default in [('cantidad', 1.0), ('precio_unit', 0.0), ('descuento_pct', 0.0),
+                             ('precio_neto_unit', 0.0), ('iva_pct', 21.0), ('subtotal_siva', 0.0)]:
+            df_items[col] = pd.to_numeric(df_items.get(col, default), errors='coerce').fillna(default)
+        df_items['sku']         = df_items.get('sku', '').fillna('').astype(str)
+        df_items['descripcion'] = df_items.get('descripcion', '').fillna('').astype(str)
+
+        edited_items_df = st.data_editor(
+            df_items,
+            column_config={
+                'sku':              st.column_config.TextColumn('Código / SKU', required=True),
+                'descripcion':      st.column_config.TextColumn('Descripción'),
+                'cantidad':         st.column_config.NumberColumn('Cantidad',      format="%.2f"),
+                'precio_unit':      st.column_config.NumberColumn('Precio lista',  format="%.4f"),
+                'descuento_pct':    st.column_config.NumberColumn('Dto %',         format="%.2f"),
+                'precio_neto_unit': st.column_config.NumberColumn('Precio neto',   format="%.4f"),
+                'iva_pct':          st.column_config.NumberColumn('IVA %',         format="%.1f"),
+                'subtotal_siva':    st.column_config.NumberColumn('Subtotal s/IVA', format="%.2f"),
+            },
+            num_rows="dynamic", use_container_width=True, key=f"items_{key_prefix}",
+        )
+        n_items = len(edited_items_df[edited_items_df['sku'].str.strip() != ''])
+        st.caption(f"{n_items} ítem(s) — podés agregar/editar/eliminar filas en la tabla.")
+
+        if not prov_nombre:
+            st.error("Completá el nombre del proveedor antes de guardar.")
+        elif not fac_numero:
+            st.error("Completá el número de factura antes de guardar.")
+        elif st.button("💾 Guardar en base de datos", key=f"save_{key_prefix}"):
+            items_to_save = [row for row in edited_items_df.to_dict('records')
+                             if str(row.get('sku', '')).strip()]
+            for it in items_to_save:
+                it.setdefault('moneda', moneda)
+            try:
+                prov_id = db.upsert_proveedor(prov_nombre,
+                                              prov_cuit or f'sin-cuit-{prov_nombre[:20]}', moneda)
+                fac_id = db.insert_factura(
+                    prov_id, fac_numero, fac_fecha, data.get('subtotal', 0),
+                    data.get('iva_21', 0), data.get('iva_105', 0), data.get('percepciones', 0),
+                    data.get('total', 0), moneda, tc, nombre, data.get('cae', ''),
+                    data.get('tipo', 'FC'),
+                )
+                if fac_id:
+                    if items_to_save:
+                        db.insert_items(fac_id, items_to_save)
+                    try:
+                        dest = db.ARCHIVOS_DIR / f"{fac_id}{suffix}"
+                        dest.write_bytes(datos_bytes)
+                        db.set_archivo_factura(fac_id, str(dest))
+                    except Exception:
+                        pass
+                    discovered = data.get('_discovered_config', {})
+                    if discovered and prov_cuit:
+                        db.save_proveedor_config(prov_cuit, discovered)
+                    st.success(f"✅ Guardada — **{prov_nombre}** — {len(items_to_save)} ítems."
+                               + (" 🧠 Perfil aprendido." if discovered and prov_cuit else ""))
+                else:
+                    st.error(f"🔁 **Ya habías subido este comprobante** "
+                             f"({_TIPO_LABEL.get(tipo_doc,'Factura')} {fac_numero} de {prov_nombre}).")
+            except Exception as e:
+                st.error(f"Error al guardar: {e}")
+
+
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 
 st.sidebar.markdown("""
@@ -179,7 +342,7 @@ st.sidebar.markdown("""
 
 page = st.sidebar.radio(
     "Navegación",
-    ["🏠 Inicio", "📤 Subir Facturas", "📄 Facturas", "📊 Cta. Cte.", "🔍 SKUs", "⚖️ Comparar", "🏢 Proveedores"],
+    ["🏠 Inicio", "📤 Subir Facturas", "📧 Bandeja", "📄 Facturas", "📊 Cta. Cte.", "🔍 SKUs", "⚖️ Comparar", "🏢 Proveedores"],
     label_visibility="collapsed",
 )
 
@@ -270,238 +433,82 @@ elif page == "📤 Subir Facturas":
     if not uploaded:
         st.stop()
 
-    ITEM_COLS = ['sku', 'descripcion', 'cantidad', 'precio_unit',
-                 'descuento_pct', 'precio_neto_unit', 'iva_pct', 'subtotal_siva']
-
     for f in uploaded:
-        # Guardar temporalmente preservando la extensión original
-        suffix = Path(f.name).suffix.lower()
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(f.read())
-            tmp_path = tmp.name
+        procesar_comprobante(f.name, f.getvalue(), key_prefix=f.name)
 
-        # Pre-cargar config del proveedor (si ya fue procesado antes)
-        try:
-            cuit_hint = extractor.quick_get_cuit(tmp_path)
-        except AttributeError:
-            cuit_hint = None
-        proveedor_config = db.get_proveedor_config(cuit_hint) if cuit_hint else None
-        nombre_guardado  = (db.get_proveedor_nombre_por_cuit(cuit_hint)
-                            if cuit_hint and hasattr(db, 'get_proveedor_nombre_por_cuit')
-                            else None)
 
-        with st.spinner(f"Procesando **{f.name}**…"):
-            try:
-                data = extractor.extract_invoice(tmp_path, config=proveedor_config)
-                data['archivo_nombre'] = f.name
-                error = None
-            except Exception as e:
-                data  = None
-                error = str(e)
-        Path(tmp_path).unlink(missing_ok=True)
+# ─────────────────────────────────────────────────────────────────────────────
+# 📧  BANDEJA (facturas que llegan por mail)
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "📧 Bandeja":
+    _page_header("📧", "Bandeja de facturas", "Facturas que llegaron por mail a Casa Sergio")
 
-        if error:
-            st.error(f"❌ **{f.name}**: {error}")
-            continue
+    cuentas = email_facturas.get_cuentas()
+    if not cuentas:
+        st.warning("⚠️ Todavía no configuraste las casillas de correo.")
+        with st.expander("📋 Cómo configurar (una sola vez)", expanded=True):
+            st.markdown("""
+**1. En cada cuenta de Gmail, generá una Contraseña de aplicación:**
+- Entrá a tu cuenta → **Seguridad** → activá la **Verificación en 2 pasos**
+- Después entrá a **https://myaccount.google.com/apppasswords**
+- Creá una contraseña (nombre: "Facturas App") → te da 16 letras (ej: `abcd efgh ijkl mnop`)
 
-        items = data.get('items', [])
-        TIPO_LABEL = {'FC': 'Factura', 'ND': 'Nota de Débito', 'NC': 'Nota de Crédito'}
-        tipo_doc = data.get('tipo', 'FC')
-        label = (
-            f"✅ {f.name}  —  "
-            f"{TIPO_LABEL.get(tipo_doc, 'Factura')}  |  "
-            f"{data.get('proveedor_nombre','?')}  |  "
-            f"{data.get('numero','?')}  |  "
-            f"{data.get('fecha','?')}"
-        )
+**2. Pegá los datos en el archivo de secretos**
+Creá/editá el archivo `.streamlit/secrets.toml` en la carpeta del programa con esto:
 
-        with st.expander(label, expanded=True):
+```toml
+[email]
+cuentas = [
+    { usuario = "electricidadcasasergio@gmail.com", password = "abcd efgh ijkl mnop" },
+    { usuario = "infoadmics@gmail.com",             password = "qrst uvwx yz12 3456" },
+]
+```
 
-            # Aviso de DUPLICADO — ya se cargó este comprobante
-            ya = None
-            if hasattr(db, 'factura_ya_cargada'):
-                ya = db.factura_ya_cargada(data.get('proveedor_cuit', ''),
-                                           data.get('numero', ''), tipo_doc)
-            if ya:
-                st.error(
-                    f"🔁 **Este comprobante YA está cargado.** "
-                    f"Número {ya['numero']} — total ${ya.get('total', 0):,.2f}. "
-                    f"No hace falta volver a subirlo."
-                )
+**3. Reiniciá el servidor** (`INICIAR_SERVIDOR.bat`) y volvé a esta pantalla.
 
-            # Aviso de tipo de comprobante
-            if tipo_doc == 'NC':
-                st.info("🟦 **Nota de Crédito** — se RESTARÁ del saldo del proveedor en la cuenta corriente.")
-            elif tipo_doc == 'ND':
-                st.info("🟧 **Nota de Débito** — se SUMARÁ al saldo del proveedor (igual que una factura).")
+🔒 Ese archivo NO se sube a internet (está protegido), las contraseñas quedan solo en tu PC.
+            """)
+        st.stop()
 
-            # Aviso: factura de VENTA emitida por Casa Sergio (no es una compra)
-            if data.get('es_venta'):
-                st.error(
-                    "🛑 **Esta parece una factura de VENTA emitida por Casa Sergio**, "
-                    "no una compra a un proveedor. Si la guardás, se registrará igual — "
-                    "pero normalmente acá cargamos solo **facturas de compra**. "
-                    "Revisá antes de guardar."
-                )
+    st.caption(f"Casillas configuradas: " + " · ".join(c.get('usuario','') for c in cuentas))
+    cc1, cc2 = st.columns([1, 3])
+    dias = cc1.selectbox("Período", [7, 15, 30, 60], index=2, key="band_dias",
+                         format_func=lambda d: f"Últimos {d} días")
+    buscar_btn = cc2.button("🔄 Revisar correos ahora", type="primary")
 
-            # Indicador de proveedor conocido
-            if proveedor_config:
-                st.success("✅ Proveedor conocido — se usó perfil guardado de facturas anteriores.")
+    # Cachear el resultado para no reconectar en cada interacción
+    @st.cache_data(show_spinner="Conectando a los correos…", ttl=300)
+    def _bandeja(dias_):
+        return email_facturas.fetch_bandeja(dias=dias_)
 
-            # ── Campos editables ─────────────────────────────────────────
-            st.markdown("#### Datos del encabezado")
-            st.caption("Revisá y corregí si algo no se detectó bien.")
+    if buscar_btn:
+        _bandeja.clear()
 
-            c1, c2 = st.columns(2)
-            # Prioridad del nombre del proveedor:
-            #  1) si el extractor lo detectó del mapa de CUITs conocidos → es confiable
-            #  2) si no, el nombre guardado en la base (corrección previa del usuario)
-            #  3) si no, lo que haya detectado el extractor
-            if data.get('proveedor_nombre_fiable'):
-                nombre_det = data.get('proveedor_nombre', '')
-            else:
-                nombre_det = nombre_guardado or data.get('proveedor_nombre', '')
-            cuit_det    = data.get('proveedor_cuit', '')
-            numero_det  = data.get('numero', '')
-            fecha_det   = data.get('fecha', date.today().strftime('%d/%m/%Y'))
-            moneda_det  = data.get('moneda', 'ARS')
-            tc_det      = data.get('tipo_cambio', 1.0)
+    correos = _bandeja(dias)
 
-            prov_nombre = c1.text_input(
-                "Proveedor" + (" ⚠️ no detectado" if not nombre_det else ""),
-                value=nombre_det, key=f"nombre_{f.name}"
+    errores = [c for c in correos if c.get('error')]
+    validos = [c for c in correos if not c.get('error')]
+    for e in errores:
+        st.error(f"❌ No se pudo leer **{e['cuenta']}**: {e['error']}")
+
+    total_adj = sum(len(c['adjuntos']) for c in validos)
+    if not validos:
+        st.info("No se encontraron correos con facturas adjuntas en el período.")
+        st.stop()
+
+    st.success(f"📨 {len(validos)} correo(s) con {total_adj} adjunto(s) en los últimos {dias} días.")
+
+    for ci, correo in enumerate(validos):
+        with st.container(border=True):
+            st.markdown(
+                f"**De:** {correo['remitente']}  \n"
+                f"**Asunto:** {correo['asunto']}  \n"
+                f"**Fecha:** {correo['fecha']}  ·  📥 {correo['cuenta']}"
             )
-            prov_cuit = c1.text_input(
-                "CUIT" + (" ⚠️ no detectado" if not cuit_det else ""),
-                value=cuit_det, key=f"cuit_{f.name}"
-            )
-            fac_numero = c2.text_input(
-                "Número de factura" + (" ⚠️ no detectado" if not numero_det else ""),
-                value=numero_det, key=f"nro_{f.name}"
-            )
-            fac_fecha = c2.text_input(
-                "Fecha (DD/MM/AAAA)",
-                value=fecha_det, key=f"fecha_{f.name}"
-            )
-
-            c3, c4 = st.columns(2)
-            moneda = c3.selectbox("Moneda", ['ARS', 'USD'],
-                                  index=0 if moneda_det == 'ARS' else 1,
-                                  key=f"moneda_{f.name}")
-            if moneda == 'USD':
-                tc = c4.number_input("Tipo de cambio (ARS/USD)",
-                                     value=float(tc_det), min_value=1.0,
-                                     key=f"tc_{f.name}")
-            else:
-                tc = 1.0
-
-            # ── Ítems — tabla editable ───────────────────────────────────
-            st.markdown("#### Ítems")
-            if not items:
-                st.warning(
-                    "⚠️ No se encontraron ítems automáticamente. "
-                    "Podés agregarlos manualmente en la tabla de abajo."
-                )
-
-            # Preparar DataFrame con las columnas estándar
-            df_items = (
-                pd.DataFrame(items).reindex(columns=ITEM_COLS)
-                if items
-                else pd.DataFrame(columns=ITEM_COLS)
-            )
-            # Valores por defecto para columnas numéricas
-            for col, default in [('cantidad', 1.0), ('precio_unit', 0.0),
-                                  ('descuento_pct', 0.0), ('precio_neto_unit', 0.0),
-                                  ('iva_pct', 21.0), ('subtotal_siva', 0.0)]:
-                df_items[col] = pd.to_numeric(df_items.get(col, default), errors='coerce').fillna(default)
-            df_items['sku']         = df_items.get('sku', '').fillna('').astype(str)
-            df_items['descripcion'] = df_items.get('descripcion', '').fillna('').astype(str)
-
-            edited_items_df = st.data_editor(
-                df_items,
-                column_config={
-                    'sku':              st.column_config.TextColumn('Código / SKU',   required=True),
-                    'descripcion':      st.column_config.TextColumn('Descripción'),
-                    'cantidad':         st.column_config.NumberColumn('Cantidad',      format="%.2f"),
-                    'precio_unit':      st.column_config.NumberColumn('Precio lista',  format="%.4f"),
-                    'descuento_pct':    st.column_config.NumberColumn('Dto %',         format="%.2f"),
-                    'precio_neto_unit': st.column_config.NumberColumn('Precio neto',   format="%.4f"),
-                    'iva_pct':          st.column_config.NumberColumn('IVA %',         format="%.1f"),
-                    'subtotal_siva':    st.column_config.NumberColumn('Subtotal s/IVA', format="%.2f"),
-                },
-                num_rows="dynamic",
-                use_container_width=True,
-                key=f"items_{f.name}",
-            )
-            n_items = len(edited_items_df[edited_items_df['sku'].str.strip() != ''])
-            st.caption(f"{n_items} ítem(s)  —  podés agregar/editar/eliminar filas directamente en la tabla.")
-
-            # ── Guardar ──────────────────────────────────────────────────
-            if not prov_nombre:
-                st.error("Completá el nombre del proveedor antes de guardar.")
-            elif not fac_numero:
-                st.error("Completá el número de factura antes de guardar.")
-            elif st.button("💾 Guardar en base de datos", key=f"save_{f.name}"):
-                # Tomar ítems del editor (solo filas con SKU no vacío)
-                items_to_save = [
-                    row for row in edited_items_df.to_dict('records')
-                    if str(row.get('sku', '')).strip()
-                ]
-                # Asegurar moneda en cada ítem
-                for it in items_to_save:
-                    it.setdefault('moneda', moneda)
-
-                try:
-                    prov_id = db.upsert_proveedor(
-                        prov_nombre,
-                        prov_cuit or f'sin-cuit-{prov_nombre[:20]}',
-                        moneda,
-                    )
-                    fac_id = db.insert_factura(
-                        prov_id,
-                        fac_numero,
-                        fac_fecha,
-                        data.get('subtotal', 0),
-                        data.get('iva_21', 0),
-                        data.get('iva_105', 0),
-                        data.get('percepciones', 0),
-                        data.get('total', 0),
-                        moneda,
-                        tc,
-                        f.name,
-                        data.get('cae', ''),
-                        data.get('tipo', 'FC'),
-                    )
-                    if fac_id:
-                        if items_to_save:
-                            db.insert_items(fac_id, items_to_save)
-
-                        # Guardar el archivo original para poder verlo después
-                        try:
-                            ext  = Path(f.name).suffix.lower()
-                            dest = db.ARCHIVOS_DIR / f"{fac_id}{ext}"
-                            dest.write_bytes(f.getvalue())
-                            db.set_archivo_factura(fac_id, str(dest))
-                        except Exception:
-                            pass
-
-                        # Guardar perfil del proveedor para mejorar futuras extracciones
-                        discovered = data.get('_discovered_config', {})
-                        if discovered and prov_cuit:
-                            db.save_proveedor_config(prov_cuit, discovered)
-
-                        st.success(
-                            f"✅ Guardada — **{prov_nombre}** — {len(items_to_save)} ítems."
-                            + (" 🧠 Perfil de proveedor aprendido." if discovered and prov_cuit else "")
-                        )
-                    else:
-                        st.error(
-                            f"🔁 **Ya habías subido este comprobante** "
-                            f"({TIPO_LABEL.get(tipo_doc,'Factura')} {fac_numero} de {prov_nombre}). "
-                            f"No se cargó de nuevo para no duplicarlo."
-                        )
-                except Exception as e:
-                    st.error(f"Error al guardar: {e}")
+            for ai, (fn, datos) in enumerate(correo['adjuntos']):
+                st.markdown(f"📎 `{fn}`")
+                procesar_comprobante(fn, datos,
+                                     key_prefix=f"mail_{ci}_{ai}", expandido=False)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
