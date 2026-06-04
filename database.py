@@ -162,6 +162,16 @@ def init_db():
             updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS catalogo (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            cuit          TEXT NOT NULL,
+            codigo        TEXT NOT NULL,
+            descripcion   TEXT,
+            norm          TEXT,
+            precio_lista  REAL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_catalogo_cuit ON catalogo(cuit);
+
         CREATE TABLE IF NOT EXISTS pagos (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             proveedor_id INTEGER NOT NULL,
@@ -444,6 +454,77 @@ def delete_factura(factura_id):
     with get_conn() as conn:
         conn.execute("DELETE FROM items    WHERE factura_id = ?", (factura_id,))
         conn.execute("DELETE FROM facturas WHERE id = ?",         (factura_id,))
+
+
+def _norm_desc(s):
+    """Normaliza una descripción para comparar: minúsculas, sin acentos ni puntuación."""
+    s = str(s or '').lower()
+    for a, b in (('á','a'),('é','e'),('í','i'),('ó','o'),('ú','u'),('ñ','n')):
+        s = s.replace(a, b)
+    s = re.sub(r'[^a-z0-9]+', ' ', s)
+    return s
+
+
+def guardar_catalogo(cuit, filas):
+    """Reemplaza el catálogo de un proveedor. filas = [(codigo, descripcion, precio), ...]."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM catalogo WHERE cuit = ?", (cuit,))
+        rows = [(cuit, str(c).strip(), str(d).strip(), _norm_desc(d), p or 0)
+                for c, d, p in filas if str(c).strip() and str(d).strip()]
+        conn.executemany(
+            "INSERT INTO catalogo (cuit, codigo, descripcion, norm, precio_lista) "
+            "VALUES (?, ?, ?, ?, ?)", rows)
+    return len(rows)
+
+
+def contar_catalogo(cuit):
+    if not cuit:
+        return 0
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM catalogo WHERE cuit = ?", (cuit,)).fetchone()[0]
+
+
+def get_catalogo(cuit):
+    """Devuelve el catálogo de un proveedor: [{'codigo','descripcion','norm','precio'}]."""
+    if not cuit:
+        return []
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT codigo, descripcion, norm, precio_lista FROM catalogo WHERE cuit = ?",
+            (cuit,)).fetchall()
+    return [{'codigo': r['codigo'], 'descripcion': r['descripcion'],
+             'norm': r['norm'], 'precio': r['precio_lista']} for r in rows]
+
+
+def match_codigo(descripcion, catalogo, umbral=0.6):
+    """
+    Busca el código de catálogo cuya descripción más se parece a la dada.
+    Devuelve (codigo, descripcion_catalogo, score) o None si no supera el umbral.
+
+    Métrica: cobertura = (tokens en común) / (tokens de la descripción de la factura).
+    Tolera que el catálogo tenga palabras de más (especificaciones extra) y errores de
+    OCR. Desempata por Jaccard (preferir la entrada de longitud más parecida).
+    """
+    objetivo = set(_norm_desc(descripcion).split())
+    objetivo.discard('')
+    if len(objetivo) < 2:
+        return None
+    mejor, mejor_cov, mejor_jac = None, 0.0, 0.0
+    for item in catalogo:
+        toks = set((item.get('norm') or '').split())
+        if not toks:
+            continue
+        inter = len(objetivo & toks)
+        if not inter:
+            continue
+        cov = inter / len(objetivo)
+        jac = inter / len(objetivo | toks)
+        if cov > mejor_cov or (cov == mejor_cov and jac > mejor_jac):
+            mejor, mejor_cov, mejor_jac = item, cov, jac
+    if mejor and mejor_cov >= umbral:
+        return (mejor['codigo'], mejor['descripcion'], round(mejor_cov, 2))
+    return None
 
 
 def get_proveedor_nombre_por_cuit(cuit):

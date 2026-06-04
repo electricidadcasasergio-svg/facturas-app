@@ -22,7 +22,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-s"
+APP_VERSION = "2026.06.04-t"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -321,6 +321,18 @@ def procesar_comprobante(nombre, datos_bytes, key_prefix, expandido=True):
 
     items    = data.get('items', [])
     tipo_doc = data.get('tipo', 'FC')
+
+    # Enriquecer SKU con el catálogo del proveedor (matcheo por descripción)
+    cuit_cat = data.get('proveedor_cuit', '')
+    catalogo = db.get_catalogo(cuit_cat) if (cuit_cat and hasattr(db, 'get_catalogo')) else []
+    n_match = 0
+    if catalogo:
+        for it in items:
+            desc = it.get('descripcion', '')
+            m = db.match_codigo(desc, catalogo)
+            if m:
+                it['sku'] = m[0]            # código del proveedor
+                n_match += 1
     label = (
         f"✅ {nombre}  —  {_TIPO_LABEL.get(tipo_doc, 'Factura')}  |  "
         f"{data.get('proveedor_nombre','?')}  |  {data.get('numero','?')}  |  "
@@ -347,6 +359,9 @@ def procesar_comprobante(nombre, datos_bytes, key_prefix, expandido=True):
 
         if proveedor_config:
             st.success("✅ Proveedor conocido — se usó perfil guardado.")
+        if catalogo:
+            st.success(f"📚 Catálogo del proveedor aplicado: {n_match} de {len(items)} "
+                       f"ítem(s) recibieron el código por descripción.")
 
         st.markdown("#### Datos del encabezado")
         st.caption("Revisá y corregí si algo no se detectó bien.")
@@ -457,7 +472,7 @@ st.sidebar.markdown("""
 
 page = st.sidebar.radio(
     "Navegación",
-    ["🏠 Inicio", "📤 Subir Facturas", "📧 Bandeja", "📄 Facturas", "✅ Control", "📊 Cta. Cte.", "🔍 SKUs", "⚖️ Comparar", "🏢 Proveedores"],
+    ["🏠 Inicio", "📤 Subir Facturas", "📧 Bandeja", "📄 Facturas", "✅ Control", "📊 Cta. Cte.", "🔍 SKUs", "⚖️ Comparar", "📚 Catálogos", "🏢 Proveedores"],
     label_visibility="collapsed",
 )
 
@@ -1456,6 +1471,105 @@ elif page == "⚖️ Comparar":
         f"💡 **Proveedor más barato en promedio:** {mejor['proveedor']}  "
         f"— precio prom. **{mejor['precio_prom']:,.2f} {mejor['moneda']}**"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 📚  CATÁLOGOS (listas de precios por proveedor → código por descripción)
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "📚 Catálogos":
+    _page_header("📚", "Catálogos de proveedores",
+                 "Subí la lista de un proveedor para asignar el código por descripción")
+
+    st.markdown(
+        "Para proveedores cuya factura **no trae el código** (ej: ARGENPLAS), subí su "
+        "**lista de precios** (Excel/CSV) con el código y la descripción. Después, al cargar "
+        "una factura de ese proveedor, la app le pone el **código del proveedor** como SKU "
+        "buscando por la descripción."
+    )
+
+    # Elegir proveedor (de los ya cargados) o ingresar CUIT manualmente
+    provs = db.get_proveedores()
+    opciones = {f"{p['nombre']}  ({p['cuit']})": p['cuit'] for p in provs}
+    col1, col2 = st.columns(2)
+    sel = col1.selectbox("Proveedor", ["— Ingresar CUIT a mano —"] + list(opciones.keys()))
+    if sel == "— Ingresar CUIT a mano —":
+        cuit_cat = col2.text_input("CUIT del proveedor", placeholder="30-57472306-6").strip()
+    else:
+        cuit_cat = opciones[sel]
+        col2.text_input("CUIT del proveedor", value=cuit_cat, disabled=True)
+
+    if cuit_cat:
+        n_actual = db.contar_catalogo(cuit_cat)
+        if n_actual:
+            st.info(f"📚 Este proveedor ya tiene **{n_actual}** productos en el catálogo. "
+                    "Si subís una lista nueva, reemplaza la anterior.")
+
+    archivo = st.file_uploader("Lista de precios (Excel o CSV)",
+                               type=["xlsx", "xls", "csv"], key="cat_file")
+    if archivo and cuit_cat:
+        try:
+            low = archivo.name.lower()
+            if low.endswith('.csv'):
+                dfc = pd.read_csv(archivo, sep=None, engine='python', dtype=str)
+            elif low.endswith('.xls'):
+                dfc = pd.read_excel(archivo, dtype=str, engine='xlrd')
+            else:
+                dfc = pd.read_excel(archivo, dtype=str, engine='openpyxl')
+        except Exception as e:
+            st.error(f"No se pudo leer el archivo: {e}")
+            st.stop()
+
+        dfc = dfc.fillna('')
+        st.markdown("#### Vista previa")
+        st.dataframe(dfc.head(8), use_container_width=True, hide_index=True)
+
+        cols = list(dfc.columns)
+        def _g(cands):
+            for k in cands:
+                for c in cols:
+                    if k in str(c).lower():
+                        return c
+            return None
+        cc1, cc2, cc3 = st.columns(3)
+        col_cod  = cc1.selectbox("Columna CÓDIGO", cols,
+                                 index=cols.index(_g(['codigo','código','cod'])) if _g(['codigo','código','cod']) in cols else 0)
+        col_desc = cc2.selectbox("Columna DESCRIPCIÓN", cols,
+                                 index=cols.index(_g(['descrip','detalle','producto'])) if _g(['descrip','detalle','producto']) in cols else 0)
+        opc_precio = ["(ninguna)"] + cols
+        col_prec = cc3.selectbox("Columna PRECIO (opcional)", opc_precio,
+                                 index=opc_precio.index(_g(['precio','lista','importe'])) if _g(['precio','lista','importe']) in cols else 0)
+
+        if st.button("💾 Guardar catálogo", type="primary"):
+            filas = []
+            for _, r in dfc.iterrows():
+                cod = str(r[col_cod]).strip()
+                des = str(r[col_desc]).strip()
+                pre = 0.0
+                if col_prec != "(ninguna)":
+                    try:
+                        pre = float(re.sub(r'[^\d.,]', '', str(r[col_prec])).replace('.', '').replace(',', '.'))
+                    except Exception:
+                        pre = 0.0
+                if cod and des:
+                    filas.append((cod, des, pre))
+            n = db.guardar_catalogo(cuit_cat, filas)
+            st.success(f"✅ Catálogo guardado: **{n}** productos para el CUIT {cuit_cat}.")
+
+    # Listado de catálogos cargados
+    st.divider()
+    st.markdown("#### Catálogos cargados")
+    with db.get_conn() as conn:
+        resumen = conn.execute("""
+            SELECT c.cuit, COUNT(*) AS n,
+                   COALESCE((SELECT nombre FROM proveedores p WHERE p.cuit=c.cuit), '') AS nombre
+            FROM catalogo c GROUP BY c.cuit ORDER BY n DESC
+        """).fetchall()
+    if resumen:
+        st.dataframe(
+            pd.DataFrame([{'Proveedor': r['nombre'], 'CUIT': r['cuit'], 'Productos': r['n']} for r in resumen]),
+            use_container_width=True, hide_index=True)
+    else:
+        st.caption("Todavía no cargaste ningún catálogo.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
