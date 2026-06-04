@@ -21,7 +21,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-m"
+APP_VERSION = "2026.06.04-n"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -41,8 +41,17 @@ st.markdown("""
 
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
-/* Ocultar header de Streamlit */
-header[data-testid="stHeader"] { display: none !important; }
+/* Header de Streamlit: transparente, pero NO oculto (ahí está la flecha para
+   reabrir la barra lateral). Solo escondemos los botones de Streamlit. */
+header[data-testid="stHeader"] { background: transparent !important; }
+[data-testid="stToolbar"] { display: none !important; }
+/* Asegurar que el control para reabrir la barra lateral siempre se vea */
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"] {
+    display: block !important;
+    visibility: visible !important;
+    z-index: 999999 !important;
+}
 
 /* Fondo principal */
 .main .block-container {
