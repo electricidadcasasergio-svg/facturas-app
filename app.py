@@ -21,7 +21,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-a"
+APP_VERSION = "2026.06.04-b"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -342,7 +342,7 @@ st.sidebar.markdown("""
 
 page = st.sidebar.radio(
     "Navegación",
-    ["🏠 Inicio", "📤 Subir Facturas", "📧 Bandeja", "📄 Facturas", "📊 Cta. Cte.", "🔍 SKUs", "⚖️ Comparar", "🏢 Proveedores"],
+    ["🏠 Inicio", "📤 Subir Facturas", "📧 Bandeja", "📄 Facturas", "✅ Control", "📊 Cta. Cte.", "🔍 SKUs", "⚖️ Comparar", "🏢 Proveedores"],
     label_visibility="collapsed",
 )
 
@@ -690,6 +690,125 @@ elif page == "📄 Facturas":
                 db.delete_factura(fac_id_del)
                 st.success("✅ Factura eliminada correctamente.")
                 st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ✅  CONTROL (conciliación con sistema de gestión vía Excel)
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "✅ Control":
+    _page_header("✅", "Control con gestión", "Subí el Excel de tu sistema y te digo qué facturas faltan cargar")
+
+    import re as _re
+
+    def _norm_num(x):
+        """Normaliza un número de comprobante a solo dígitos (ignora guiones, espacios, letras)."""
+        return _re.sub(r'\D', '', str(x or ''))
+
+    st.markdown(
+        "Subí un Excel (`.xlsx`) o CSV exportado de tu sistema de gestión. "
+        "Tiene que tener una columna con el **número de comprobante** "
+        "(y si querés, proveedor, fecha y total para ver el detalle)."
+    )
+
+    archivo = st.file_uploader("Archivo de gestión (Excel o CSV)",
+                               type=["xlsx", "xls", "csv"], key="ctrl_file")
+    if not archivo:
+        st.info("Esperando el archivo…")
+        st.stop()
+
+    # Leer el archivo
+    try:
+        if archivo.name.lower().endswith('.csv'):
+            df_g = pd.read_csv(archivo, sep=None, engine='python', dtype=str)
+        else:
+            df_g = pd.read_excel(archivo, dtype=str)
+    except Exception as e:
+        st.error(f"No se pudo leer el archivo: {e}")
+        st.stop()
+
+    df_g = df_g.fillna('')
+    if df_g.empty:
+        st.warning("El archivo está vacío.")
+        st.stop()
+
+    st.markdown("#### Vista previa del archivo")
+    st.dataframe(df_g.head(10), use_container_width=True, hide_index=True)
+
+    # Detectar automáticamente la columna del número
+    cols = list(df_g.columns)
+    def _guess(cands):
+        for c in cols:
+            cl = str(c).lower()
+            if any(k in cl for k in cands):
+                return c
+        return None
+    col_num_def  = _guess(['nro', 'núm', 'num', 'comprob', 'factura', 'fact'])
+    col_prov_def = _guess(['prove', 'razón', 'razon', 'nombre'])
+
+    st.markdown("#### Indicá qué columna es el número de comprobante")
+    c1, c2 = st.columns(2)
+    col_num  = c1.selectbox("Columna del NÚMERO", cols,
+                            index=cols.index(col_num_def) if col_num_def in cols else 0)
+    prov_opts = ["(ninguna)"] + cols
+    col_prov = c2.selectbox("Columna del PROVEEDOR (opcional)", prov_opts,
+                            index=prov_opts.index(col_prov_def) if col_prov_def in cols else 0)
+
+    if not st.button("🔍 Comparar con lo cargado", type="primary"):
+        st.stop()
+
+    # Números en el sistema de gestión (Excel)
+    df_g['_num'] = df_g[col_num].apply(_norm_num)
+    df_g = df_g[df_g['_num'] != '']
+    nums_gestion = set(df_g['_num'])
+
+    # Números cargados en la app
+    cargadas = db.get_facturas()
+    nums_app = {_norm_num(f['numero']) for f in cargadas}
+
+    # Comparación
+    faltan_cargar = df_g[~df_g['_num'].isin(nums_app)].copy()   # en Excel, no en app
+    nums_solo_app = nums_app - nums_gestion                      # en app, no en Excel
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("📋 En tu gestión", f"{len(nums_gestion):,}")
+    m2.metric("✅ Ya cargadas", f"{len(nums_gestion) - len(faltan_cargar):,}")
+    m3.metric("⚠️ Faltan cargar", f"{len(faltan_cargar):,}")
+
+    st.divider()
+    st.markdown("### ⚠️ Facturas que FALTAN cargar en la app")
+    if faltan_cargar.empty:
+        st.success("🎉 ¡Están todas cargadas! No falta ninguna factura de tu sistema de gestión.")
+    else:
+        st.caption(f"{len(faltan_cargar)} comprobante(s) están en tu gestión pero no en la app:")
+        mostrar = [col_num] + ([col_prov] if col_prov != "(ninguna)" else [])
+        # agregar columnas extra útiles si existen
+        for extra in cols:
+            cl = str(extra).lower()
+            if extra not in mostrar and any(k in cl for k in ['fecha', 'total', 'import', 'monto']):
+                mostrar.append(extra)
+        st.dataframe(faltan_cargar[mostrar], use_container_width=True, hide_index=True)
+        st.download_button(
+            "⬇️ Descargar lista de faltantes (CSV)",
+            faltan_cargar[mostrar].to_csv(index=False).encode('utf-8'),
+            file_name="facturas_faltantes.csv",
+        )
+
+    # Extra: cargadas en la app que NO están en la gestión (posible error de carga)
+    if nums_solo_app:
+        with st.expander(f"🔎 En la app pero NO en tu gestión ({len(nums_solo_app)})"):
+            st.caption("Pueden ser facturas que cargaste de más, o que tu sistema todavía no tiene.")
+            extra_rows = [f for f in cargadas if _norm_num(f['numero']) in nums_solo_app]
+            df_extra = pd.DataFrame(extra_rows)
+            if not df_extra.empty:
+                st.dataframe(
+                    df_extra[['numero', 'fecha_display', 'proveedor_nombre', 'total', 'moneda']],
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        'numero': 'Número', 'fecha_display': 'Fecha',
+                        'proveedor_nombre': 'Proveedor',
+                        'total': st.column_config.NumberColumn('Total', format="%.2f"),
+                        'moneda': 'Moneda',
+                    })
 
 
 # ─────────────────────────────────────────────────────────────────────────────
