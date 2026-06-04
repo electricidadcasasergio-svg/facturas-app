@@ -21,7 +21,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-d"
+APP_VERSION = "2026.06.04-e"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -166,6 +166,55 @@ def _page_header(icon: str, title: str, subtitle: str = ""):
         {sub_html}
     </div>
     """, unsafe_allow_html=True)
+
+
+# ── Generar PDF de una tabla (para el control de faltantes) ──────────────────
+
+def generar_pdf_tabla(df, columnas, titulo, subtitulo=""):
+    """Devuelve los bytes de un PDF con la tabla dada. Requiere fpdf2."""
+    from fpdf import FPDF
+
+    def _s(x):  # sanitizar texto a latin-1 (fpdf core fonts)
+        return str(x).encode('latin-1', 'replace').decode('latin-1')
+
+    pdf = FPDF(orientation='L', unit='mm', format='A4')
+    pdf.set_auto_page_break(auto=True, margin=12)
+    pdf.add_page()
+
+    pdf.set_font('Helvetica', 'B', 15)
+    pdf.cell(0, 9, _s(titulo), ln=1)
+    pdf.set_font('Helvetica', '', 9)
+    fecha_hoy = date.today().strftime('%d/%m/%Y')
+    pdf.cell(0, 6, _s(f"Casa Sergio  ·  Generado: {fecha_hoy}  ·  {subtitulo}"), ln=1)
+    pdf.ln(3)
+
+    ancho = pdf.epw
+    w = ancho / max(1, len(columnas))
+
+    def _encabezado():
+        pdf.set_font('Helvetica', 'B', 9)
+        pdf.set_fill_color(21, 88, 167)
+        pdf.set_text_color(255, 255, 255)
+        for col in columnas:
+            pdf.cell(w, 8, _s(str(col))[:38], border=1, align='C', fill=True)
+        pdf.ln()
+        pdf.set_text_color(0, 0, 0)
+
+    _encabezado()
+    pdf.set_font('Helvetica', '', 8)
+    fill = False
+    for _, row in df.iterrows():
+        if pdf.get_y() > pdf.h - 16:
+            pdf.add_page()
+            _encabezado()
+            pdf.set_font('Helvetica', '', 8)
+        pdf.set_fill_color(240, 244, 250)
+        for col in columnas:
+            pdf.cell(w, 7, _s(str(row[col]))[:40], border=1, fill=fill)
+        pdf.ln()
+        fill = not fill
+
+    return bytes(pdf.output())
 
 
 # ── Procesar y guardar un comprobante (reutilizable: subir y bandeja mail) ────
@@ -824,11 +873,29 @@ elif page == "✅ Control":
             if extra not in mostrar and any(k in cl for k in ['fecha', 'total', 'import', 'monto']):
                 mostrar.append(extra)
         st.dataframe(faltan_cargar[mostrar], use_container_width=True, hide_index=True)
-        st.download_button(
-            "⬇️ Descargar lista de faltantes (CSV)",
+
+        bc1, bc2 = st.columns(2)
+        bc1.download_button(
+            "⬇️ Descargar CSV",
             faltan_cargar[mostrar].to_csv(index=False).encode('utf-8'),
             file_name="facturas_faltantes.csv",
         )
+        try:
+            pdf_bytes = generar_pdf_tabla(
+                faltan_cargar[mostrar], mostrar,
+                titulo="Facturas faltantes de cargar",
+                subtitulo=f"{len(faltan_cargar)} comprobantes pendientes",
+            )
+            bc2.download_button(
+                "📄 Descargar PDF",
+                pdf_bytes,
+                file_name="facturas_faltantes.pdf",
+                mime="application/pdf",
+            )
+        except ImportError:
+            bc2.warning("Para el PDF: actualizá y reiniciá el servidor (falta la librería fpdf2).")
+        except Exception as e:
+            bc2.error(f"No se pudo generar el PDF: {e}")
 
     # Extra: cargadas en la app que NO están en la gestión (posible error de carga)
     if claves_solo_app:
