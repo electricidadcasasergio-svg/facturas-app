@@ -21,7 +21,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-c"
+APP_VERSION = "2026.06.04-d"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -744,44 +744,71 @@ elif page == "✅ Control":
     st.markdown("#### Vista previa del archivo")
     st.dataframe(df_g.head(10), use_container_width=True, hide_index=True)
 
-    # Detectar automáticamente la columna del número
+    # Detectar automáticamente las columnas (keyword más específico primero)
     cols = list(df_g.columns)
     def _guess(cands):
-        for c in cols:
-            cl = str(c).lower()
-            if any(k in cl for k in cands):
-                return c
+        for k in cands:
+            for c in cols:
+                if k in str(c).lower():
+                    return c
         return None
-    col_num_def  = _guess(['nro', 'núm', 'num', 'comprob', 'factura', 'fact'])
-    col_prov_def = _guess(['prove', 'razón', 'razon', 'nombre'])
+    col_num_def  = _guess(['numfac', 'numero', 'nrofac', 'nro', 'comprob', 'num', 'fact'])
+    col_suc_def  = _guess(['sucursal', 'punto', 'pdv', 'ptovta', 'pto'])
+    col_prov_def = _guess(['razon', 'razón', 'prove', 'nombre'])
 
-    st.markdown("#### Indicá qué columna es el número de comprobante")
-    c1, c2 = st.columns(2)
-    col_num  = c1.selectbox("Columna del NÚMERO", cols,
+    st.markdown("#### Indicá las columnas")
+    c1, c2, c3 = st.columns(3)
+    col_num  = c1.selectbox("NÚMERO de comprobante", cols,
                             index=cols.index(col_num_def) if col_num_def in cols else 0)
-    prov_opts = ["(ninguna)"] + cols
-    col_prov = c2.selectbox("Columna del PROVEEDOR (opcional)", prov_opts,
-                            index=prov_opts.index(col_prov_def) if col_prov_def in cols else 0)
+    opc = ["(ninguna)"] + cols
+    col_suc  = c2.selectbox("SUCURSAL / Punto de venta", opc,
+                            index=opc.index(col_suc_def) if col_suc_def in cols else 0)
+    col_prov = c3.selectbox("PROVEEDOR (opcional)", opc,
+                            index=opc.index(col_prov_def) if col_prov_def in cols else 0)
 
     if not st.button("🔍 Comparar con lo cargado", type="primary"):
         st.stop()
 
-    # Números en el sistema de gestión (Excel)
-    df_g['_num'] = df_g[col_num].apply(_norm_num)
-    df_g = df_g[df_g['_num'] != '']
-    nums_gestion = set(df_g['_num'])
+    usar_suc = col_suc != "(ninguna)"
 
-    # Números cargados en la app
+    def _clave_gestion(row):
+        """Clave por VALOR numérico (ignora ceros a la izquierda)."""
+        n = _norm_num(row[col_num])
+        if not n:
+            return None
+        if usar_suc:
+            s = _norm_num(row[col_suc])
+            return (int(s) if s else 0, int(n))
+        return (int(n),)
+
+    def _clave_app(numero):
+        grupos = _re.findall(r'\d+', str(numero or ''))
+        if not grupos:
+            return None
+        if usar_suc:
+            # 2+ grupos → (sucursal, secuencia) ; 1 grupo → (0, seq)
+            if len(grupos) >= 2:
+                return (int(grupos[0]), int(grupos[-1]))
+            return (0, int(grupos[0]))
+        return (int(grupos[-1]),)
+
+    # Claves del sistema de gestión (Excel)
+    df_g['_clave'] = df_g.apply(_clave_gestion, axis=1)
+    df_g = df_g[df_g['_clave'].notna()]
+    claves_gestion = set(df_g['_clave'])
+
+    # Claves cargadas en la app
     cargadas = db.get_facturas()
-    nums_app = {_norm_num(f['numero']) for f in cargadas}
+    claves_app = {_clave_app(f['numero']) for f in cargadas}
+    claves_app.discard(None)
 
     # Comparación
-    faltan_cargar = df_g[~df_g['_num'].isin(nums_app)].copy()   # en Excel, no en app
-    nums_solo_app = nums_app - nums_gestion                      # en app, no en Excel
+    faltan_cargar = df_g[~df_g['_clave'].isin(claves_app)].copy()   # en Excel, no en app
+    claves_solo_app = claves_app - claves_gestion                   # en app, no en Excel
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("📋 En tu gestión", f"{len(nums_gestion):,}")
-    m2.metric("✅ Ya cargadas", f"{len(nums_gestion) - len(faltan_cargar):,}")
+    m1.metric("📋 En tu gestión", f"{len(claves_gestion):,}")
+    m2.metric("✅ Ya cargadas", f"{len(claves_gestion) - len(faltan_cargar):,}")
     m3.metric("⚠️ Faltan cargar", f"{len(faltan_cargar):,}")
 
     st.divider()
@@ -804,10 +831,10 @@ elif page == "✅ Control":
         )
 
     # Extra: cargadas en la app que NO están en la gestión (posible error de carga)
-    if nums_solo_app:
-        with st.expander(f"🔎 En la app pero NO en tu gestión ({len(nums_solo_app)})"):
+    if claves_solo_app:
+        with st.expander(f"🔎 En la app pero NO en tu gestión ({len(claves_solo_app)})"):
             st.caption("Pueden ser facturas que cargaste de más, o que tu sistema todavía no tiene.")
-            extra_rows = [f for f in cargadas if _norm_num(f['numero']) in nums_solo_app]
+            extra_rows = [f for f in cargadas if _clave_app(f['numero']) in claves_solo_app]
             df_extra = pd.DataFrame(extra_rows)
             if not df_extra.empty:
                 st.dataframe(
