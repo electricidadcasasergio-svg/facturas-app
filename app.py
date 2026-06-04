@@ -21,7 +21,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-b"
+APP_VERSION = "2026.06.04-c"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -718,10 +718,20 @@ elif page == "✅ Control":
 
     # Leer el archivo
     try:
-        if archivo.name.lower().endswith('.csv'):
+        nombre_low = archivo.name.lower()
+        if nombre_low.endswith('.csv'):
             df_g = pd.read_csv(archivo, sep=None, engine='python', dtype=str)
+        elif nombre_low.endswith('.xls'):
+            df_g = pd.read_excel(archivo, dtype=str, engine='xlrd')
         else:
-            df_g = pd.read_excel(archivo, dtype=str)
+            df_g = pd.read_excel(archivo, dtype=str, engine='openpyxl')
+    except ImportError:
+        st.error(
+            "Falta una librería para leer este Excel. En la PC del servidor:\n"
+            "1) Cerrá el servidor  2) Ejecutá **ACTUALIZAR.bat**  3) Reabrí el servidor.\n\n"
+            "Si sigue fallando, abrí el Excel y guardalo como **.xlsx** (Excel moderno)."
+        )
+        st.stop()
     except Exception as e:
         st.error(f"No se pudo leer el archivo: {e}")
         st.stop()
