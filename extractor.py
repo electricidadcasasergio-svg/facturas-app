@@ -231,6 +231,9 @@ def _parse_full(text, filename, tables=None, config=None):
     elif '30-70900997-0' in text:
         header.setdefault('proveedor_nombre', 'BUHO ELECTROMECANICA S.A.')
         items = _items_buho(text)
+    elif '30-71418460-8' in text:
+        header.setdefault('proveedor_nombre', 'GRUPO HLC S.R.L.')
+        items = _items_hlc(text)
     else:
         header_hint = config.get('header_trigger') if config else None
         items = _items_generic(tables, text,
@@ -317,24 +320,33 @@ def _parse_header(text, filename):
             h['numero'] = re.sub(r'\s+', '-', m.group(1).strip())
             break
 
+    # Fecha en texto: "03 de junio de 2026" → 03/06/2026 (HLC y similares)
+    _MESES = {'enero': '01', 'febrero': '02', 'marzo': '03', 'abril': '04',
+              'mayo': '05', 'junio': '06', 'julio': '07', 'agosto': '08',
+              'septiembre': '09', 'setiembre': '09', 'octubre': '10',
+              'noviembre': '11', 'diciembre': '12'}
+    mtxt = re.search(r'(\d{1,2})\s+de\s+([A-Za-záéíóúÁÉÍÓÚ]+)\s+de\s+(\d{4})', text, re.IGNORECASE)
+    if mtxt and mtxt.group(2).lower() in _MESES:
+        h['fecha'] = f"{int(mtxt.group(1)):02d}/{_MESES[mtxt.group(2).lower()]}/{mtxt.group(3)}"
+
     # Fecha (DD/MM/YYYY o DD/MM/YY) — buscar en todo el texto
     # Excluir fechas de "Inicio de Actividades" / "Vencimiento" (no son la fecha de la factura)
-    for pat in [
-        r'(?:Fecha(?!\s*(?:de\s+)?(?:Inicio|Vto|Venc))[^\n:]*:|FECHA:)\s*(\d{2}/\d{2}/\d{4})',
-        r'(?:Fecha\s+emisi[oó]n:?\s*)(\d{2}/\d{2}/\d{4})',
-        r'\bFecha:\s*(\d{2}/\d{2}/\d{4})',
-        r'\bFecha:\s*(\d{2}/\d{2}/\d{2})(?!\d)',          # Fecha: 03/06/26 (año 2 dígitos)
-        r'\b(\d{2}/\d{2}/\d{4})\b',
-        r'\b(\d{2}/\d{2}/\d{2})(?!\d)',                    # fallback año 2 dígitos
-    ]:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            f = m.group(1)
-            # Expandir año de 2 dígitos a 4 (20YY)
-            if len(f) == 8:
-                f = f[:6] + '20' + f[6:]
-            h['fecha'] = f
-            break
+    if not h.get('fecha'):
+        for pat in [
+            r'(?:Fecha(?!\s*(?:de\s+)?(?:Inicio|Vto|Venc))[^\n:]*:|FECHA:)\s*(\d{2}/\d{2}/\d{4})',
+            r'(?:Fecha\s+emisi[oó]n:?\s*)(\d{2}/\d{2}/\d{4})',
+            r'\bFecha:\s*(\d{2}/\d{2}/\d{4})',
+            r'\bFecha:\s*(\d{2}/\d{2}/\d{2})(?!\d)',          # Fecha: 03/06/26 (año 2 dígitos)
+            r'\b(\d{2}/\d{2}/\d{4})\b',
+            r'\b(\d{2}/\d{2}/\d{2})(?!\d)',                    # fallback año 2 dígitos
+        ]:
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                f = m.group(1)
+                if len(f) == 8:
+                    f = f[:6] + '20' + f[6:]
+                h['fecha'] = f
+                break
 
     # CUITs — excluir los CUITs propios de Casa Sergio; el primero restante es el proveedor
     def _prov_cuits_from(src):
@@ -378,6 +390,7 @@ def _parse_header(text, filename):
         '30-50194898-1': 'CAMBRE I.C. y F.S.A.',
         '30-61406102-9': 'FABRICA ARGENTINA DE CONDUCTORES BIMETALICOS S.A.',
         '30-70900997-0': 'BUHO ELECTROMECANICA S.A.',
+        '30-71418460-8': 'GRUPO HLC S.R.L.',
     }
     for cuit_known, nombre_known in _nombres_por_cuit.items():
         if cuit_known in text:
@@ -1054,6 +1067,76 @@ def _items_buho(text):
             'cantidad':         qty,
             'precio_unit':      precio,
             'descuento_pct':    bonif,
+            'precio_neto_unit': neto,
+            'iva_pct':          21.0,
+            'subtotal_siva':    importe,
+        })
+
+    return items
+
+
+# ── Parser GRUPO HLC S.R.L. (CUIT 30-71418460-8) ─────────────────────────────
+# Columnas: Cantidad | Código | Descripción | Unitario | Dto. | Unit.C/Dto | Importe
+# Formato numérico AMERICANO (4,405.437 = 4405.437). Cantidad va PRIMERO.
+# Descripción puede ocupar 2 líneas.
+
+def _items_hlc(text):
+    items = []
+    lines = text.split('\n')
+    in_table = False
+
+    ITEM_RE = re.compile(
+        r'^(\d+(?:[.,]\d+)?)\s+'          # cantidad
+        r'([A-Z0-9][A-Z0-9\-/.]*)\s+'    # código
+        r'(.+?)\s+'                       # descripción (lazy)
+        r'([\d.,]+(?:\s+[\d.,]+){0,3})$', # 1 a 4 números (unitario [dto unitc/dto] importe)
+        re.IGNORECASE
+    )
+
+    def _num(s):
+        s = re.sub(r'[\s%$]', '', str(s)).strip()
+        if not s or s == '-':
+            return 0.0
+        s = s.replace(',', '')   # coma = miles
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+
+    for line in lines:
+        lu = line.upper()
+        if not in_table:
+            if 'CANTIDAD' in lu and ('DIGO' in lu or 'CODIGO' in lu) and 'IMPORTE' in lu:
+                in_table = True
+            continue
+
+        if re.match(r'\s*(REMITOS|Sub\s*Total|Vendedor|CAE|Iva\b|Total\b|VTO|RM\b)',
+                    line, re.IGNORECASE):
+            break
+
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        m = ITEM_RE.match(stripped)
+        if not m:
+            # continuación de descripción del ítem anterior
+            if items and not re.search(r'[\d.,]+\s*$', stripped):
+                items[-1]['descripcion'] += ' ' + stripped
+            continue
+
+        nums = [_num(x) for x in m.group(4).split()]
+        importe = nums[-1]
+        unitario = nums[0]
+        qty = _num(m.group(1))
+        neto = round(importe / qty, 4) if qty else unitario
+
+        items.append({
+            'sku':              m.group(2),
+            'descripcion':      m.group(3).strip(),
+            'cantidad':         qty,
+            'precio_unit':      unitario,
+            'descuento_pct':    0.0,
             'precio_neto_unit': neto,
             'iva_pct':          21.0,
             'subtotal_siva':    importe,
