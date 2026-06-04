@@ -234,6 +234,9 @@ def _parse_full(text, filename, tables=None, config=None):
     elif '30-71418460-8' in text:
         header.setdefault('proveedor_nombre', 'GRUPO HLC S.R.L.')
         items = _items_hlc(text)
+    elif '30-57472306-6' in text:
+        header.setdefault('proveedor_nombre', 'ARGENPLAS S.A.')
+        items = _items_argenplas(text)
     else:
         header_hint = config.get('header_trigger') if config else None
         items = _items_generic(tables, text,
@@ -391,6 +394,7 @@ def _parse_header(text, filename):
         '30-61406102-9': 'FABRICA ARGENTINA DE CONDUCTORES BIMETALICOS S.A.',
         '30-70900997-0': 'BUHO ELECTROMECANICA S.A.',
         '30-71418460-8': 'GRUPO HLC S.R.L.',
+        '30-57472306-6': 'ARGENPLAS S.A.',
     }
     for cuit_known, nombre_known in _nombres_por_cuit.items():
         if cuit_known in text:
@@ -498,28 +502,52 @@ def _parse_header(text, filename):
     if m:
         h['cae'] = m.group(1)
 
-    # ── Pie tipo "tabla": etiquetas en una línea, valores en la siguiente ──────
-    # Ej (BAW): "Subtotal Impuestos IVA % 21,00 IVA 10,5% TOTAL"
-    #           "745.193,23 37.259,66 156.490,58 0,00 938.943,47"
-    mlab = re.search(
-        r'(\bSubtotal\b[^\n]*\bTOTAL\b[^\n]*)\n\s*([\d.,]+(?:[^\S\n]+[\d.,]+){1,5})',
-        text, re.IGNORECASE
-    )
-    if mlab:
-        etiquetas = mlab.group(1)
-        nums = [_parse_num(n) for n in re.findall(r'[\d.,]+', mlab.group(2))]
-        if len(nums) >= 2:
+    # ── Pie tipo "tabla": etiquetas en una línea, valores en otra ─────────────
+    # Ej (BAW):       "Subtotal Impuestos IVA % 21,00 IVA 10,5% TOTAL" / valores
+    # Ej (ARGENPLAS): "IMPORTE NETO IMPORTE IVA PERCEPCIONES IIBB IMPORTE TOTAL" / "$ ..."
+    _lineas = text.split('\n')
+    for i, ln in enumerate(_lineas):
+        if not re.search(r'\bTOTAL\b', ln, re.IGNORECASE):
+            continue
+        # debe parecer un pie de totales, no el encabezado de la tabla de ítems
+        if not re.search(r'Subtotal|IMPORTE\s+NETO|IMPORTE\s+IVA', ln, re.IGNORECASE):
+            continue
+        if re.search(r'Cantidad|Art[ií]culo|Descripci|C[oó]digo|Precio\s+Unit|Neto\s+total',
+                     ln, re.IGNORECASE):
+            continue
+        etiquetas = ln
+        # Buscar la línea de valores en las siguientes (puede haber basura OCR en el medio)
+        nums = []
+        for j in range(i + 1, min(i + 6, len(_lineas))):
+            cand = re.findall(r'\d[\d.,]*', _lineas[j])
+            if len(cand) >= 2:
+                nums = [_parse_num(n) for n in cand]
+                break
+        if len(nums) < 2:
+            continue
+
+        # Mapear cada valor a su columna según el ORDEN de las etiquetas
+        columnas = []
+        for kw, field in [
+            (r'SUB[\s-]?TOTAL|IMPORTE\s+NETO|NETO\s+GRAVADO|\bNETO\b', 'subtotal'),
+            (r'IVA[\s_]*10[.,]?5',                                    'iva_105'),
+            (r'IVA[\s_]*21|IMPORTE\s+IVA|\bIVA\b',                    'iva_21'),
+            (r'PERCEP|IMPUESTO',                                       'percepciones'),
+            (r'\bTOTAL\b',                                             'total'),
+        ]:
+            mm = re.search(kw, etiquetas, re.IGNORECASE)
+            if mm and field not in [c[1] for c in columnas]:
+                columnas.append((mm.start(), field))
+        columnas.sort()
+        # Asignar valores posicionalmente a las columnas detectadas
+        if len(columnas) == len(nums):
+            for (_, field), val in zip(columnas, nums):
+                h[field] = val
+        else:
+            # fallback: primero=subtotal, último=total
             h['subtotal'] = nums[0]
-            h['total']    = nums[-1]
-            medio = nums[1:-1]
-            tiene_imp = bool(re.search(r'Impuesto|Percep', etiquetas, re.IGNORECASE))
-            if tiene_imp and medio:
-                h['percepciones'] = medio[0]
-                medio = medio[1:]
-            if len(medio) >= 1:
-                h['iva_21'] = medio[0]
-            if len(medio) >= 2:
-                h['iva_105'] = medio[1]
+            h['total'] = nums[-1]
+        break
 
     # Totales del pie (solo completar lo que el pie-tabla no haya resuelto)
     if not h.get('subtotal'):
@@ -1140,6 +1168,74 @@ def _items_hlc(text):
             'precio_neto_unit': neto,
             'iva_pct':          21.0,
             'subtotal_siva':    importe,
+        })
+
+    return items
+
+
+# ── Parser ARGENPLAS S.A. (CUIT 30-57472306-6) ───────────────────────────────
+# Columnas: CANT | PRODUCTOS | DESC.% | UNIT.$ | SUBTOTAL  (sin código de SKU)
+# Suele venir de FOTO (OCR), números argentinos. Cantidad va PRIMERO.
+
+def _items_argenplas(text):
+    items = []
+    lines = text.split('\n')
+    in_table = False
+
+    for line in lines:
+        lu = line.upper()
+        if not in_table:
+            # OCR puede leer "CANT." como "CANR." → alcanza con PRODUCTOS + UNIT/SUBTOTAL
+            if 'PRODUCTO' in lu and ('UNIT' in lu or 'SUBTOTAL' in lu):
+                in_table = True
+            continue
+
+        if re.match(r'\s*(IMPORTE\s+NETO|Detalle\s+Percep|Nro\.?\s*de\s*CAE|'
+                    r'La\s+percep|CAE\b|TOTAL\b)', line, re.IGNORECASE):
+            break
+
+        s = line.strip()
+        if not s:
+            continue
+
+        # Cantidad al inicio (OCR puede leer "30,00" como "30/00")
+        m = re.match(r'^(\d{1,4}(?:[.,/]\d{1,3})?)\s+(.+)$', s)
+        if not m:
+            if items and not re.search(r'\d{3,}', s):   # continuación de descripción
+                items[-1]['descripcion'] += ' ' + s
+            continue
+
+        cant = _parse_num(m.group(1).replace('/', ','), context='qty')
+        resto = m.group(2)
+        toks = resto.split()
+
+        # números del final (desc% / unit / subtotal)
+        nums = []
+        k = len(toks) - 1
+        while k >= 0 and re.match(r'^[\d.,]+$', toks[k]) and len(nums) < 4:
+            nums.insert(0, toks[k])
+            k -= 1
+        desc = ' '.join(toks[:k + 1]).strip()
+        if not desc or not nums:
+            continue
+
+        vals = [_parse_num(n) for n in nums]
+        unit = vals[-2] if len(vals) >= 2 else vals[0]
+        subtotal = round(cant * unit, 2) if cant and unit else (vals[-1] if vals else 0.0)
+
+        # SKU: especificación del cable (ej "1x16mm2") si aparece; si no, primeras palabras
+        msku = re.search(r'\d+\s*[xX]\s*\d+\s*mm2?', desc)
+        sku = (msku.group(0).replace(' ', '') if msku else desc[:20]).upper()
+
+        items.append({
+            'sku':              sku,
+            'descripcion':      desc,
+            'cantidad':         cant,
+            'precio_unit':      unit,
+            'descuento_pct':    0.0,
+            'precio_neto_unit': unit,
+            'iva_pct':          21.0,
+            'subtotal_siva':    subtotal,
         })
 
     return items
