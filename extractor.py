@@ -256,6 +256,7 @@ def _parse_header(text, filename):
 
     # Número de factura — varios formatos posibles
     for pat in [
+        r'\b([A-Z]-\d{5}-\d{8})\b',                     # A-00005-00237314 (BAW, etc.) — limpio
         r'N[°º]?\s*:?\s*([A-Z]-\d{5}-\d{8})',          # A-00005-00235741
         r'N[°º]\s*:\s*(\d{5}-\d{6,8})',                  # 00004-00246028
         r'Factura\s+N[°º]?:?\s*(\d{4}-\d{5,8})',         # 0006-00139834
@@ -518,7 +519,8 @@ def _items_baw(text):
 
         parts = line.split()
         # Primera token debe ser código de artículo (letras + dígitos, sin espacios)
-        if not parts or not re.match(r'^[A-Z][A-Z0-9\-]+$', parts[0]):
+        # Permite guion, barra y punto en el código (ej: IDE225/030, PA41C10)
+        if not parts or not re.match(r'^[A-Z][A-Z0-9\-/.]+$', parts[0]):
             continue
         if len(parts) < 6:
             continue
