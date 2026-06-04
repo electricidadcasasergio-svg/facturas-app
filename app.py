@@ -22,7 +22,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-p"
+APP_VERSION = "2026.06.04-q"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -1011,49 +1011,64 @@ elif page == "✅ Control":
             bd1, bd2 = st.columns([1, 2])
             dias_mail = bd1.selectbox("Buscar en", [30, 60, 90, 180], index=2,
                                       format_func=lambda d: f"Últimos {d} días", key="ctrl_mail_dias")
+            st.caption("Abre cada PDF del correo, le extrae el número y lo compara con las faltantes. "
+                       "Puede tardar un poco si hay muchos adjuntos.")
             if bd2.button("🔎 Buscar faltantes en los mails", type="primary", key="ctrl_buscar_mail"):
-                with st.spinner("Revisando correos…"):
+
+                @st.cache_data(show_spinner=False)
+                def _num_de_adjunto(datos, fn):
+                    """Extrae el número de comprobante de un adjunto (cacheado por contenido)."""
+                    suf = Path(fn).suffix.lower()
+                    if suf not in ('.pdf', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'):
+                        return ''
+                    import tempfile as _tmp
+                    with _tmp.NamedTemporaryFile(suffix=suf, delete=False) as t:
+                        t.write(datos)
+                        p = t.name
+                    try:
+                        return extractor.extract_invoice(p).get('numero', '') or ''
+                    except Exception:
+                        return ''
+                    finally:
+                        Path(p).unlink(missing_ok=True)
+
+                with st.spinner("Analizando los adjuntos de los correos…"):
                     correos_m = [c for c in email_facturas.fetch_bandeja(dias=dias_mail)
                                  if not c.get('error')]
-
-                def _digs(s):
-                    return _re.sub(r'\D', '', s or '')
-
-                # Indexar cada correo por los dígitos de asunto + nombres de adjunto
-                idx = []
-                for c in correos_m:
-                    blob = _digs(c.get('asunto', '') + ' ' +
-                                 ' '.join(fn for fn, _ in c.get('adjuntos', [])))
-                    idx.append((c, blob))
+                    # Indexar por clave (sucursal, secuencia) según el número del PDF
+                    indice = {}
+                    for c in correos_m:
+                        for fn, datos in c.get('adjuntos', []):
+                            num = _num_de_adjunto(datos, fn)
+                            clave = _clave_app(num) if num else None
+                            if clave and clave not in indice:
+                                indice[clave] = (c, fn, datos)
 
                 encontrados = 0
                 no_encontradas = []
+                vistos = set()
                 for _, row in faltan_cargar.iterrows():
-                    num = _norm_num(row[col_num])
-                    seq = str(int(num)) if num else ''      # sin ceros a la izquierda
+                    clave = row['_clave']
                     etiqueta = str(row[col_num])
                     if col_prov != "(ninguna)":
                         etiqueta += f"  —  {row[col_prov]}"
 
-                    match = None
-                    if seq and len(seq) >= 4:
-                        for c, blob in idx:
-                            if seq in blob:
-                                match = c
-                                break
-                    if match:
+                    hit = indice.get(clave)
+                    if hit:
                         encontrados += 1
-                        st.markdown(f"✅ **{etiqueta}** → en 📥 {match['cuenta']}  ·  _{match['asunto'][:60]}_")
-                        for fn, datos in match['adjuntos']:
-                            import hashlib
-                            clave = "ctrlmail_" + hashlib.md5(datos).hexdigest()[:10]
-                            procesar_comprobante(fn, datos, key_prefix=clave, expandido=False)
+                        c, fn, datos = hit
+                        st.markdown(f"✅ **{etiqueta}** → en 📥 {c['cuenta']}  ·  _{c['asunto'][:60]}_")
+                        import hashlib
+                        kclave = "ctrlmail_" + hashlib.md5(datos).hexdigest()[:10]
+                        procesar_comprobante(fn, datos, key_prefix=kclave, expandido=False)
                     else:
                         no_encontradas.append(etiqueta)
 
                 st.info(f"📨 Encontradas en el correo: **{encontrados}** de {len(faltan_cargar)}.")
                 if no_encontradas:
                     with st.expander(f"❔ No encontradas en el correo ({len(no_encontradas)})"):
+                        st.caption("Pedíselas al proveedor o cargalas a mano. "
+                                   "(Puede que el correo sea más viejo que el período elegido.)")
                         for e in no_encontradas:
                             st.markdown(f"- {e}")
 
