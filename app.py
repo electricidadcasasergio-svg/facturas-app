@@ -7,6 +7,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 import importlib
 import database as db
@@ -21,7 +22,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-n"
+APP_VERSION = "2026.06.04-o"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -152,6 +153,39 @@ div[data-baseweb="input"] > div {
 }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ── Botón flotante propio para abrir/cerrar la barra lateral ──────────────────
+# (garantía por si la flecha nativa de Streamlit no aparece en alguna versión)
+components.html("""
+<script>
+const d = window.parent.document;
+if (!d.getElementById('btn-toggle-sidebar')) {
+    const b = d.createElement('button');
+    b.id = 'btn-toggle-sidebar';
+    b.innerHTML = '☰';
+    b.title = 'Mostrar/ocultar menú';
+    b.style.cssText = 'position:fixed;top:10px;left:10px;z-index:1000000;' +
+        'background:#1558a7;color:#fff;border:none;border-radius:10px;' +
+        'width:42px;height:42px;font-size:20px;cursor:pointer;' +
+        'box-shadow:0 3px 10px rgba(0,0,0,.25);';
+    b.onclick = function() {
+        const sb = d.querySelector('section[data-testid="stSidebar"]');
+        const abierto = sb && sb.offsetWidth > 50;
+        const expandir = d.querySelector(
+            '[data-testid="stSidebarCollapsedControl"] button,' +
+            '[data-testid="collapsedControl"] button');
+        const colapsar = d.querySelector(
+            '[data-testid="stSidebarCollapseButton"] button,' +
+            '[data-testid="stSidebarCollapseButton"]');
+        if (abierto && colapsar) { colapsar.click(); }
+        else if (expandir) { expandir.click(); }
+        else if (colapsar) { colapsar.click(); }
+    };
+    d.body.appendChild(b);
+}
+</script>
+""", height=0)
 
 
 # ── Helper: encabezado de página ──────────────────────────────────────────────
