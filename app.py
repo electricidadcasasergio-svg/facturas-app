@@ -21,7 +21,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-k"
+APP_VERSION = "2026.06.04-l"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -482,8 +482,11 @@ elif page == "📤 Subir Facturas":
     if not uploaded:
         st.stop()
 
+    import hashlib
     for f in uploaded:
-        procesar_comprobante(f.name, f.getvalue(), key_prefix=f.name)
+        datos_f = f.getvalue()
+        clave_f = "up_" + hashlib.md5(datos_f).hexdigest()[:10]
+        procesar_comprobante(f.name, datos_f, key_prefix=clave_f)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -572,10 +575,14 @@ cuentas = [
                 f"**Fecha:** {correo['fecha']}  ·  📥 {correo['cuenta']}"
             )
             for ai, (fn, datos) in enumerate(correo['adjuntos']):
+                # Clave basada en el CONTENIDO del archivo (no en la posición),
+                # para que los campos no se "peguen" al filtrar/reordenar correos.
+                import hashlib
+                clave = "mail_" + hashlib.md5(datos).hexdigest()[:10]
                 vc1, vc2 = st.columns([3, 1])
                 vc1.markdown(f"📎 `{fn}`")
                 vc2.download_button("⬇️ Descargar", datos, file_name=fn,
-                                    key=f"dl_mail_{ci}_{ai}")
+                                    key=f"dl_{clave}")
                 ext = Path(fn).suffix.lower()
                 with st.expander("👁️ Ver archivo adjunto"):
                     if ext in ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'):
@@ -591,7 +598,7 @@ cuentas = [
                     else:
                         st.info("Vista previa no disponible para este tipo de archivo.")
                 procesar_comprobante(fn, datos,
-                                     key_prefix=f"mail_{ci}_{ai}", expandido=False)
+                                     key_prefix=clave, expandido=False)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
