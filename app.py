@@ -21,7 +21,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-e"
+APP_VERSION = "2026.06.04-f"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -520,10 +520,12 @@ cuentas = [
         st.stop()
 
     st.caption(f"Casillas configuradas: " + " · ".join(c.get('usuario','') for c in cuentas))
-    cc1, cc2 = st.columns([1, 3])
-    dias = cc1.selectbox("Período", [7, 15, 30, 60], index=2, key="band_dias",
+    cc1, cc2, cc3 = st.columns([1, 2, 1])
+    dias = cc1.selectbox("Período", [7, 15, 30, 60], index=0, key="band_dias",
                          format_func=lambda d: f"Últimos {d} días")
-    buscar_btn = cc2.button("🔄 Revisar correos ahora", type="primary")
+    filtro = cc2.text_input("🔎 Buscar", placeholder="proveedor, asunto o archivo…",
+                            key="band_filtro")
+    buscar_btn = cc3.button("🔄 Revisar correos", type="primary")
 
     # Cachear el resultado para no reconectar en cada interacción
     @st.cache_data(show_spinner="Conectando a los correos…", ttl=300)
@@ -540,12 +542,27 @@ cuentas = [
     for e in errores:
         st.error(f"❌ No se pudo leer **{e['cuenta']}**: {e['error']}")
 
-    total_adj = sum(len(c['adjuntos']) for c in validos)
     if not validos:
         st.info("No se encontraron correos con facturas adjuntas en el período.")
         st.stop()
 
-    st.success(f"📨 {len(validos)} correo(s) con {total_adj} adjunto(s) en los últimos {dias} días.")
+    # Filtro de búsqueda (remitente / asunto / cuenta / nombre de adjunto)
+    if filtro:
+        ft = filtro.lower()
+        def _coincide(c):
+            texto = " ".join([
+                c.get('remitente', ''), c.get('asunto', ''), c.get('cuenta', ''),
+                " ".join(fn for fn, _ in c.get('adjuntos', []))
+            ]).lower()
+            return ft in texto
+        validos = [c for c in validos if _coincide(c)]
+        if not validos:
+            st.warning(f"Ningún correo coincide con «{filtro}».")
+            st.stop()
+
+    total_adj = sum(len(c['adjuntos']) for c in validos)
+    extra = f" (filtrado por «{filtro}»)" if filtro else ""
+    st.success(f"📨 {len(validos)} correo(s) con {total_adj} adjunto(s) en los últimos {dias} días{extra}.")
 
     for ci, correo in enumerate(validos):
         with st.container(border=True):
