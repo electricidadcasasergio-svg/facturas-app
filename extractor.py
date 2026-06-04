@@ -228,6 +228,9 @@ def _parse_full(text, filename, tables=None, config=None):
     elif '30-61406102-9' in text:
         header.setdefault('proveedor_nombre', 'FABRICA ARGENTINA DE CONDUCTORES BIMETALICOS S.A.')
         items = _items_cant_first(text)
+    elif '30-70900997-0' in text:
+        header.setdefault('proveedor_nombre', 'BUHO ELECTROMECANICA S.A.')
+        items = _items_buho(text)
     else:
         header_hint = config.get('header_trigger') if config else None
         items = _items_generic(tables, text,
@@ -986,6 +989,67 @@ def _items_cant_first(text):
             'precio_neto_unit': precio_neto,
             'iva_pct':          iva,
             'subtotal_siva':    total,
+        })
+
+    return items
+
+
+# ── Parser BUHO ELECTROMECANICA (CUIT 30-70900997-0) ─────────────────────────
+# Columnas: Cod Art | Cantidad | Descripción | P/Unit | %Bon | Importe
+# El texto viene de OCR (PDF degradado). La cantidad va ENTRE el código y la descripción.
+
+def _items_buho(text):
+    items = []
+    lines = text.split('\n')
+    in_table = False
+
+    # code  qty  descripcion  p_unit  %bon  importe
+    ITEM_RE = re.compile(
+        r'^([A-Z0-9][A-Z0-9\-/.]*)\s+'   # código
+        r'(\d+(?:[.,]\d+)?)\s+'          # cantidad
+        r'(.+?)\s+'                       # descripción (lazy)
+        r'([\d.,]+)\s+'                   # precio unitario
+        r'([\d.,]+)\s+'                   # % bonificación
+        r'([\d.,]+)$',                    # importe (subtotal s/IVA)
+        re.IGNORECASE
+    )
+
+    for line in lines:
+        lu = line.upper()
+        if not in_table:
+            if 'CANTIDAD' in lu and ('DESCRIPCION' in lu or 'DESCRIPCI' in lu):
+                in_table = True
+            continue
+
+        if re.match(r'\s*(SUBTOTAL|Datos\s+Bancari|BANCO\b|CBU\b|Son\s+PESOS|'
+                    r'C\.?A\.?E|BON\.|I\.?V\.?A|PERC|TOTAL)', line, re.IGNORECASE):
+            break
+
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        m = ITEM_RE.match(stripped)
+        if not m:
+            continue
+
+        precio = _parse_num(m.group(4))
+        bonif  = _parse_num(m.group(5))
+        importe = _parse_num(m.group(6))
+        if importe > 1e10 or precio > 1e10:   # basura de OCR
+            continue
+        qty = _parse_num(m.group(2), context='qty')
+        neto = round(importe / qty, 4) if qty else precio
+
+        items.append({
+            'sku':              m.group(1),
+            'descripcion':      m.group(3).strip(),
+            'cantidad':         qty,
+            'precio_unit':      precio,
+            'descuento_pct':    bonif,
+            'precio_neto_unit': neto,
+            'iva_pct':          21.0,
+            'subtotal_siva':    importe,
         })
 
     return items
