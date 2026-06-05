@@ -24,7 +24,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.05-c"
+APP_VERSION = "2026.06.05-d"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -474,11 +474,17 @@ def procesar_comprobante(nombre, datos_bytes, key_prefix, expandido=True):
         n_items = len(edited_items_df[edited_items_df['sku'].str.strip() != ''])
         st.caption(f"{n_items} ítem(s) — podés agregar/editar/eliminar filas en la tabla.")
 
+        faltan = []
         if not prov_nombre:
-            st.error("Completá el nombre del proveedor antes de guardar.")
-        elif not fac_numero:
-            st.error("Completá el número de factura antes de guardar.")
-        elif st.button("💾 Guardar en base de datos", key=f"save_{key_prefix}"):
+            faltan.append("proveedor")
+        if not fac_numero:
+            faltan.append("número")
+        if faltan:
+            st.warning("⚠️ Completá el **" + "** y el **".join(faltan) +
+                       "** (arriba) para poder guardar.")
+
+        if st.button("💾 Guardar en sistema", key=f"save_{key_prefix}",
+                     type="primary", disabled=bool(faltan), use_container_width=True):
             items_to_save = [row for row in edited_items_df.to_dict('records')
                              if str(row.get('sku', '')).strip()]
             for it in items_to_save:
