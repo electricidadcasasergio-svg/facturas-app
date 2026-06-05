@@ -24,7 +24,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.05-a"
+APP_VERSION = "2026.06.05-b"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -747,7 +747,8 @@ cuentas = [
             )
             for ai, (fn, datos) in enumerate(correo['adjuntos']):
                 kh = hashlib.md5(datos).hexdigest()[:10]
-                clave = "mail_" + kh
+                uid = f"{kh}_{ci}_{ai}"          # único aunque el adjunto se repita
+                clave = "mail_" + uid
                 if solo_nuevas and estados.get(kh) == 'cargada':
                     continue
                 badge = "🆕 " if estados.get(kh) == 'nueva' else ""
@@ -755,14 +756,14 @@ cuentas = [
                 vc1.markdown(f"{badge}📎 `{fn}`")
                 vc2.download_button("⬇️ Descargar", datos, file_name=fn, key=f"dl_{clave}")
 
-                abierto = kh in st.session_state.band_abiertos
+                abierto = uid in st.session_state.band_abiertos
                 if not abierto:
                     if vc3.button("📝 Procesar", key=f"proc_{clave}"):
-                        st.session_state.band_abiertos.add(kh)
+                        st.session_state.band_abiertos.add(uid)
                         st.rerun()
                 else:
                     if vc3.button("✖ Cerrar", key=f"close_{clave}"):
-                        st.session_state.band_abiertos.discard(kh)
+                        st.session_state.band_abiertos.discard(uid)
                         st.rerun()
 
                 ext = Path(fn).suffix.lower()
