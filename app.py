@@ -2,6 +2,7 @@ import base64
 import io
 import contextlib
 import tempfile
+import zipfile
 from datetime import date
 from pathlib import Path
 
@@ -24,7 +25,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.05-e"
+APP_VERSION = "2026.06.05-f"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -535,6 +536,93 @@ def procesar_comprobante(nombre, datos_bytes, key_prefix, expandido=True):
                 st.error(f"Error al guardar: {e}")
 
 
+def cargar_factura_auto(nombre, datos_bytes):
+    """
+    Carga automática (sin revisión) de una factura. Devuelve un dict con el resultado:
+      estado: 'ok' | 'duplicada' | 'manual' | 'error'
+    """
+    data, error = _extraer_factura(datos_bytes, nombre)
+    if error:
+        return {'estado': 'error', 'nombre': nombre, 'detalle': error}
+
+    numero    = (data.get('numero') or '').strip()
+    prov_cuit = (data.get('proveedor_cuit') or '').strip()
+    tipo      = data.get('tipo', 'FC')
+    comprador = data.get('comprador_cuit', COMPRADOR_DEFAULT)
+    prov_nombre = (data.get('proveedor_nombre')
+                   or (db.get_proveedor_nombre_por_cuit(prov_cuit) if prov_cuit else '')
+                   or '')
+
+    if not numero or not prov_nombre:
+        return {'estado': 'manual', 'nombre': nombre,
+                'detalle': 'no se detectó número o proveedor'}
+
+    if db.factura_ya_cargada(prov_cuit, numero, tipo, comprador):
+        return {'estado': 'duplicada', 'nombre': nombre,
+                'detalle': f"{prov_nombre} {numero}"}
+
+    # Ítems + enriquecer con catálogo
+    items = data.get('items', [])
+    catalogo = db.get_catalogo(prov_cuit) if prov_cuit else []
+    if catalogo:
+        for it in items:
+            m = db.match_codigo(it.get('descripcion', ''), catalogo)
+            if m:
+                it['sku'] = m[0]
+    moneda = data.get('moneda', 'ARS')
+    items_to_save = [it for it in items if str(it.get('sku', '')).strip()]
+    for it in items_to_save:
+        it.setdefault('moneda', moneda)
+
+    try:
+        prov_id = db.upsert_proveedor(prov_nombre, prov_cuit or f'sin-cuit-{prov_nombre[:20]}', moneda)
+        fac_id = db.insert_factura(
+            prov_id, numero, data.get('fecha', ''), data.get('subtotal', 0),
+            data.get('iva_21', 0), data.get('iva_105', 0), data.get('percepciones', 0),
+            data.get('total', 0), moneda, data.get('tipo_cambio', 1.0), nombre,
+            data.get('cae', ''), tipo, comprador,
+        )
+        if not fac_id:
+            return {'estado': 'duplicada', 'nombre': nombre, 'detalle': f"{prov_nombre} {numero}"}
+        if items_to_save:
+            db.insert_items(fac_id, items_to_save)
+        try:
+            ext = Path(nombre).suffix.lower()
+            dest = db.ARCHIVOS_DIR / f"{fac_id}{ext}"
+            dest.write_bytes(datos_bytes)
+            db.set_archivo_factura(fac_id, str(dest))
+        except Exception:
+            pass
+        disc = data.get('_discovered_config', {})
+        if disc and prov_cuit:
+            db.save_proveedor_config(prov_cuit, disc)
+        return {'estado': 'ok', 'nombre': nombre,
+                'detalle': f"{_TIPO_LABEL.get(tipo,'Factura')} {numero} — {prov_nombre} "
+                           f"({COMPRADORES.get(comprador, comprador)}) — ${data.get('total',0):,.2f}"}
+    except Exception as e:
+        return {'estado': 'error', 'nombre': nombre, 'detalle': str(e)}
+
+
+def archivos_desde_subida(uploaded):
+    """Expande los archivos subidos: si hay un ZIP, devuelve su contenido (PDF/imágenes)."""
+    exts = ('.pdf', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff')
+    archivos = []
+    for f in uploaded:
+        if f.name.lower().endswith('.zip'):
+            try:
+                with zipfile.ZipFile(io.BytesIO(f.getvalue())) as z:
+                    for info in z.infolist():
+                        if info.is_dir():
+                            continue
+                        if Path(info.filename).suffix.lower() in exts:
+                            archivos.append((Path(info.filename).name, z.read(info)))
+            except Exception as e:
+                st.error(f"No se pudo abrir el ZIP {f.name}: {e}")
+        else:
+            archivos.append((f.name, f.getvalue()))
+    return archivos
+
+
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 
 st.sidebar.markdown("""
@@ -628,22 +716,63 @@ if page == "🏠 Inicio":
 # 📤  SUBIR FACTURAS
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "📤 Subir Facturas":
-    _page_header("📤", "Subir Facturas", "PDFs o fotos JPG/PNG — se previsualizan antes de guardar")
+    _page_header("📤", "Subir Facturas", "PDF, foto, o un ZIP con muchas facturas")
 
     uploaded = st.file_uploader(
-        "Arrastrá los archivos acá (PDF, JPG, PNG)",
-        type=["pdf", "jpg", "jpeg", "png"],
+        "Arrastrá los archivos acá (PDF, JPG, PNG o un ZIP con varias facturas)",
+        type=["pdf", "jpg", "jpeg", "png", "zip"],
         accept_multiple_files=True,
     )
 
     if not uploaded:
         st.stop()
 
+    archivos = archivos_desde_subida(uploaded)
+    if not archivos:
+        st.warning("No se encontraron PDFs ni imágenes en lo que subiste.")
+        st.stop()
+
+    hay_zip = any(f.name.lower().endswith('.zip') for f in uploaded)
+
+    # ── Modo carga automática (recomendado para ZIP o muchos archivos) ────────
+    if hay_zip or len(archivos) > 3:
+        st.info(f"📦 Se encontraron **{len(archivos)} archivos**. "
+                "Con la carga automática, la app procesa todos y carga **solo los que faltan** "
+                "(saltea los ya cargados). Después podés revisarlos en 📄 Facturas.")
+        if st.button("⚡ Cargar automáticamente las facturas nuevas", type="primary"):
+            barra = st.progress(0.0, text="Procesando…")
+            res = {'ok': [], 'duplicada': [], 'manual': [], 'error': []}
+            for i, (nombre, datos) in enumerate(archivos, 1):
+                r = cargar_factura_auto(nombre, datos)
+                res[r['estado']].append(r)
+                barra.progress(i / len(archivos), text=f"Procesando {i} de {len(archivos)}…")
+            barra.empty()
+
+            st.success(f"✅ Cargadas: **{len(res['ok'])}**   ·   "
+                       f"🔁 Ya estaban: {len(res['duplicada'])}   ·   "
+                       f"✍️ Para revisar a mano: {len(res['manual'])}   ·   "
+                       f"❌ Con error: {len(res['error'])}")
+
+            if res['ok']:
+                with st.expander(f"✅ Cargadas ({len(res['ok'])})", expanded=True):
+                    for r in res['ok']:
+                        st.markdown(f"- {r['detalle']}")
+            if res['manual']:
+                with st.expander(f"✍️ No se pudieron cargar solas ({len(res['manual'])}) — "
+                                 "subilas de a una para completar los datos"):
+                    for r in res['manual']:
+                        st.markdown(f"- `{r['nombre']}` — {r['detalle']}")
+            if res['error']:
+                with st.expander(f"❌ Con error ({len(res['error'])})"):
+                    for r in res['error']:
+                        st.markdown(f"- `{r['nombre']}` — {r['detalle']}")
+        st.stop()
+
+    # ── Pocos archivos sueltos → carga manual con revisión ────────────────────
     import hashlib
-    for f in uploaded:
-        datos_f = f.getvalue()
-        clave_f = "up_" + hashlib.md5(datos_f).hexdigest()[:10]
-        procesar_comprobante(f.name, datos_f, key_prefix=clave_f)
+    for nombre, datos in archivos:
+        clave_f = "up_" + hashlib.md5(datos).hexdigest()[:10]
+        procesar_comprobante(nombre, datos, key_prefix=clave_f)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
