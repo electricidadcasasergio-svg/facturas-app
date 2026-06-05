@@ -24,7 +24,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-y"
+APP_VERSION = "2026.06.04-z"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -648,19 +648,21 @@ cuentas = [
         st.stop()
 
     st.caption(f"Casillas configuradas: " + " · ".join(c.get('usuario','') for c in cuentas))
-    cc1, cc2, cc3 = st.columns([1, 2, 1])
-    dias = cc1.selectbox("Período", [7, 15, 30, 60], index=0, key="band_dias",
-                         format_func=lambda d: f"Últimos {d} días")
-    filtro = cc2.text_input("🔎 Buscar", placeholder="proveedor, asunto o archivo…",
-                            key="band_filtro")
-    buscar_btn = cc3.button("🔄 Revisar correos", type="primary")
+    st.markdown("Buscá **por proveedor** (ej: `coresa`, `cambre`, `argenplas`) y elegí el período. "
+                "Trae solo esos correos — más rápido y sin errores.")
+    cc1, cc2, cc3 = st.columns([2, 1, 1])
+    filtro = cc1.text_input("🔎 Buscar proveedor / palabra",
+                            placeholder="ej: coresa", key="band_filtro")
+    dias = cc2.selectbox("Período", [30, 60, 90, 180, 365], index=2, key="band_dias",
+                         format_func=lambda d: (f"Últimos {d} días" if d < 365 else "Último año"))
+    buscar_btn = cc3.button("🔄 Buscar", type="primary")
     solo_nuevas = st.checkbox("🆕 Mostrar solo las que NO están cargadas todavía", value=False,
                               help="Analiza cada adjunto y oculta las que ya cargaste. Tarda un poco más.")
 
-    # Cachear el resultado para no reconectar en cada interacción
-    @st.cache_data(show_spinner="Conectando a los correos…", ttl=300)
-    def _bandeja(dias_):
-        return email_facturas.fetch_bandeja(dias=dias_)
+    # Cachear el resultado por (días, texto) para no reconectar en cada interacción
+    @st.cache_data(show_spinner="Buscando en los correos…", ttl=300)
+    def _bandeja(dias_, texto_):
+        return email_facturas.fetch_bandeja(dias=dias_, texto=texto_)
 
     # Estado de un adjunto: extrae número/cuit/tipo y dice si ya está cargado (cacheado)
     @st.cache_data(show_spinner=False)
@@ -680,9 +682,17 @@ cuentas = [
             Path(p).unlink(missing_ok=True)
 
     if buscar_btn:
+        st.session_state.band_buscado = (dias, filtro)
         _bandeja.clear()
 
-    correos = _bandeja(dias)
+    busqueda = st.session_state.get('band_buscado')
+    if not busqueda:
+        st.info("Escribí el proveedor (ej: `coresa`) y tocá **🔄 Buscar**. "
+                "Dejá el buscador vacío solo si querés ver todos.")
+        st.stop()
+
+    dias_q, filtro_q = busqueda
+    correos = _bandeja(dias_q, filtro_q)
 
     errores = [c for c in correos if c.get('error')]
     validos = [c for c in correos if not c.get('error')]
@@ -690,22 +700,9 @@ cuentas = [
         st.error(f"❌ No se pudo leer **{e['cuenta']}**: {e['error']}")
 
     if not validos:
-        st.info("No se encontraron correos con facturas adjuntas en el período.")
+        q_txt = f" para «{filtro_q}»" if filtro_q else ""
+        st.info(f"No se encontraron correos con facturas adjuntas{q_txt} en el período.")
         st.stop()
-
-    # Filtro de búsqueda (remitente / asunto / cuenta / nombre de adjunto)
-    if filtro:
-        ft = filtro.lower()
-        def _coincide(c):
-            texto = " ".join([
-                c.get('remitente', ''), c.get('asunto', ''), c.get('cuenta', ''),
-                " ".join(fn for fn, _ in c.get('adjuntos', []))
-            ]).lower()
-            return ft in texto
-        validos = [c for c in validos if _coincide(c)]
-        if not validos:
-            st.warning(f"Ningún correo coincide con «{filtro}».")
-            st.stop()
 
     # Analizar estado (nueva / ya cargada) de cada adjunto si se pidió
     estados = {}   # clave_hash -> 'nueva' | 'cargada'
@@ -728,9 +725,9 @@ cuentas = [
             st.stop()
 
     total_adj = sum(len(c['adjuntos']) for c in validos)
-    extra = f" (filtrado por «{filtro}»)" if filtro else ""
+    extra = f" de «{filtro_q}»" if filtro_q else ""
     estado_txt = " — solo NUEVAS" if solo_nuevas else ""
-    st.success(f"📨 {len(validos)} correo(s) con {total_adj} adjunto(s) en los últimos {dias} días{extra}{estado_txt}.")
+    st.success(f"📨 {len(validos)} correo(s){extra} con {total_adj} adjunto(s) en el período{estado_txt}.")
     st.caption("Tocá **📝 Procesar** en la factura que quieras cargar. (Se procesa de a una para no sobrecargar el OCR.)")
 
     # Recordar qué adjuntos fueron abiertos para procesar (solo esos usan OCR)

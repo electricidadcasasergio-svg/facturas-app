@@ -41,10 +41,13 @@ def get_cuentas():
         return []
 
 
-def fetch_bandeja(cuentas=None, dias=30, max_por_cuenta=80):
+def fetch_bandeja(cuentas=None, dias=30, max_por_cuenta=80, texto=''):
     """
     Devuelve una lista de correos (más nuevos primero) con adjuntos de factura.
     Cada item: {cuenta, remitente, asunto, fecha, adjuntos:[(nombre, bytes)], error?}
+
+    texto: si se indica, filtra en Gmail por ese término (remitente/asunto/cuerpo).
+           Ej: 'coresa' → solo correos de Coresa. Permite ampliar el rango sin traer todo.
     """
     if cuentas is None:
         cuentas = get_cuentas()
@@ -59,10 +62,12 @@ def fetch_bandeja(cuentas=None, dias=30, max_por_cuenta=80):
             M = imaplib.IMAP4_SSL(IMAP_HOST)
             M.login(usuario, passwd)
             M.select('INBOX')
-            # Búsqueda Gmail: con adjunto y recientes
+            # Búsqueda Gmail: con adjunto, recientes y (opcional) por término del proveedor
+            consulta = f'has:attachment newer_than:{dias}d'
+            if texto and texto.strip():
+                consulta += f' {texto.strip()}'
             try:
-                typ, data = M.search(None, 'X-GM-RAW',
-                                     f'"has:attachment newer_than:{dias}d"')
+                typ, data = M.search(None, 'X-GM-RAW', f'"{consulta}"')
             except Exception:
                 typ, data = M.search(None, 'ALL')
             ids = data[0].split() if data and data[0] else []
