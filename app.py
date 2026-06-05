@@ -24,7 +24,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.05-d"
+APP_VERSION = "2026.06.05-e"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -333,6 +333,13 @@ _ITEM_COLS = ['sku', 'descripcion', 'cantidad', 'precio_unit',
               'descuento_pct', 'precio_neto_unit', 'iva_pct', 'subtotal_siva']
 _TIPO_LABEL = {'FC': 'Factura', 'ND': 'Nota de Débito', 'NC': 'Nota de Crédito'}
 
+# Empresas compradoras (las dos razones sociales propias)
+COMPRADORES = {
+    '20-14018158-8': 'MILNE SERGIO GUSTAVO',
+    '30-71662001-4': 'ELECTRO CASA SERGIO SRL',
+}
+COMPRADOR_DEFAULT = '20-14018158-8'
+
 
 @st.cache_data(show_spinner=False)
 def _extraer_factura(datos_bytes, nombre):
@@ -397,10 +404,12 @@ def procesar_comprobante(nombre, datos_bytes, key_prefix, expandido=True):
         ya = None
         if hasattr(db, 'factura_ya_cargada'):
             ya = db.factura_ya_cargada(data.get('proveedor_cuit', ''),
-                                       data.get('numero', ''), tipo_doc)
+                                       data.get('numero', ''), tipo_doc,
+                                       data.get('comprador_cuit'))
         if ya:
-            st.error(f"🔁 **Este comprobante YA está cargado.** Número {ya['numero']} — "
-                     f"total ${ya.get('total', 0):,.2f}. No hace falta volver a subirlo.")
+            comp_nom = COMPRADORES.get(data.get('comprador_cuit'), '')
+            st.error(f"🔁 **Este comprobante YA está cargado** (a {comp_nom}). "
+                     f"Número {ya['numero']} — total ${ya.get('total', 0):,.2f}.")
 
         if tipo_doc == 'NC':
             st.info("🟦 **Nota de Crédito** — se RESTARÁ del saldo del proveedor.")
@@ -439,11 +448,18 @@ def procesar_comprobante(nombre, datos_bytes, key_prefix, expandido=True):
                                     value=numero_det, key=f"nro_{key_prefix}")
         fac_fecha   = c2.text_input("Fecha (DD/MM/AAAA)", value=fecha_det, key=f"fecha_{key_prefix}")
 
-        c3, c4 = st.columns(2)
+        c3, c4, c5 = st.columns(3)
         moneda = c3.selectbox("Moneda", ['ARS', 'USD'], index=0 if moneda_det == 'ARS' else 1,
                               key=f"moneda_{key_prefix}")
         tc = c4.number_input("Tipo de cambio (ARS/USD)", value=float(tc_det), min_value=1.0,
                              key=f"tc_{key_prefix}") if moneda == 'USD' else 1.0
+        # Empresa compradora (a quién le facturó el proveedor)
+        comp_det = data.get('comprador_cuit', COMPRADOR_DEFAULT)
+        comp_cuits = list(COMPRADORES.keys())
+        comprador = c5.selectbox(
+            "Empresa (a tu nombre)", comp_cuits,
+            index=comp_cuits.index(comp_det) if comp_det in comp_cuits else 0,
+            format_func=lambda c: COMPRADORES[c], key=f"comp_{key_prefix}")
 
         st.markdown("#### Ítems")
         if not items:
@@ -496,7 +512,7 @@ def procesar_comprobante(nombre, datos_bytes, key_prefix, expandido=True):
                     prov_id, fac_numero, fac_fecha, data.get('subtotal', 0),
                     data.get('iva_21', 0), data.get('iva_105', 0), data.get('percepciones', 0),
                     data.get('total', 0), moneda, tc, nombre, data.get('cae', ''),
-                    data.get('tipo', 'FC'),
+                    data.get('tipo', 'FC'), comprador,
                 )
                 if fac_id:
                     if items_to_save:
@@ -1251,8 +1267,14 @@ elif page == "📊 Cta. Cte.":
         st.info("No hay proveedores cargados aún.")
         st.stop()
 
+    # Empresa compradora: cuenta corriente separada por cada razón social propia
+    emp_opts = ["Todas"] + list(COMPRADORES.keys())
+    emp_sel = st.radio("Empresa", emp_opts, horizontal=True, key="cc_empresa",
+                       format_func=lambda c: c if c == "Todas" else COMPRADORES[c])
+    comp_filtro = None if emp_sel == "Todas" else emp_sel
+
     # ── Resumen general ──────────────────────────────────────────────────────
-    saldos = db.get_saldos_proveedores()
+    saldos = db.get_saldos_proveedores(comprador=comp_filtro)
     df_sal = pd.DataFrame(saldos)
 
     st.markdown("#### Resumen de saldos")
@@ -1308,7 +1330,11 @@ elif page == "📊 Cta. Cte.":
         moneda_cc = monedas_prov[0]
 
     simbolo = "U$S" if moneda_cc == 'USD' else "$"
-    movs, saldo_actual = db.get_cuenta_corriente(prov_id_cc, moneda_cc)
+    movs, saldo_actual = db.get_cuenta_corriente(prov_id_cc, moneda_cc, comp_filtro)
+    if comp_filtro:
+        st.caption(f"Mostrando la cuenta de **{COMPRADORES[comp_filtro]}**.")
+    else:
+        st.caption("Mostrando **ambas empresas** juntas. Elegí una arriba para ver su cuenta por separado.")
 
     ca1, ca2, ca3 = st.columns(3)
     total_f_prov = sum(m['debe']  for m in movs)
@@ -1342,13 +1368,19 @@ elif page == "📊 Cta. Cte.":
     # ── Registrar pago ───────────────────────────────────────────────────────
     st.divider()
     with st.expander("💳 Registrar pago a este proveedor"):
-        cp1, cp2, cp3, cp4 = st.columns([2, 1, 1, 2])
+        cp1, cp2, cp3 = st.columns(3)
         monto_pago    = cp1.number_input("Monto", min_value=0.0, step=1000.0, key="cc_monto")
         moneda_pago   = cp2.selectbox("Moneda", ['ARS', 'USD'],
                                       index=(['ARS', 'USD'].index(moneda_cc) if moneda_cc in ('ARS', 'USD') else 0),
                                       key="cc_moneda_pago")
         fecha_pago_cc = cp3.date_input("Fecha", value=date.today(), key="cc_fecha")
-        desc_pago     = cp4.text_input("Descripción (opcional)", placeholder="ej: Transferencia banco", key="cc_desc")
+        cp4, cp5 = st.columns([1, 2])
+        # A qué empresa corresponde el pago
+        _emp_pago_opts = list(COMPRADORES.keys())
+        _idx = _emp_pago_opts.index(comp_filtro) if comp_filtro in _emp_pago_opts else 0
+        comprador_pago = cp4.selectbox("Empresa que paga", _emp_pago_opts, index=_idx,
+                                       format_func=lambda c: COMPRADORES[c], key="cc_comp_pago")
+        desc_pago     = cp5.text_input("Descripción (opcional)", placeholder="ej: Transferencia banco", key="cc_desc")
 
         if st.button("💳 Registrar pago", type="primary", key="cc_btn_pago"):
             if monto_pago <= 0:
@@ -1360,6 +1392,7 @@ elif page == "📊 Cta. Cte.":
                     fecha_pago_cc.strftime('%d/%m/%Y'),
                     desc_pago or 'Pago',
                     moneda_pago,
+                    comprador_pago,
                 )
                 sim = "U$S" if moneda_pago == 'USD' else "$"
                 st.success(f"✅ Pago de **{sim} {monto_pago:,.2f}** registrado para {prov_sel_cc}.")

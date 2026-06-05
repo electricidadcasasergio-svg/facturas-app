@@ -55,13 +55,17 @@ def _parse_num(s, context='price'):
         return 0.0
 
 
-# ── CUITs propios de Casa Sergio (nunca son el proveedor) ────────────────────
-# Si alguno de estos aparece en la factura, es el COMPRADOR, no el vendedor.
-# El primer CUIT que NO esté en este set es el proveedor.
-_OWN_CUITS = {
-    '20-14018158-8',   # Milne Sergio Gustavo (persona física)
-    '30-71662001-4',   # Electro Casa Sergio SRL
+# ── CUITs propios (empresas compradoras) ─────────────────────────────────────
+# Si alguno aparece en la factura, es el COMPRADOR (una de nuestras empresas),
+# no el vendedor. El primer CUIT que NO esté acá es el proveedor.
+_COMPRADORES = {
+    '20-14018158-8': 'MILNE SERGIO GUSTAVO',
+    '30-71662001-4': 'ELECTRO CASA SERGIO SRL',
 }
+# versiones sin guiones (para texto OCR)
+_COMPRADORES_SIN_GUION = {c.replace('-', ''): c for c in _COMPRADORES}
+_OWN_CUITS = set(_COMPRADORES.keys())
+COMPRADOR_DEFAULT = '20-14018158-8'   # Milne (histórico) si no se detecta
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
@@ -371,6 +375,20 @@ def _parse_header(text, filename):
                 break
     if prov_cuits:
         h['proveedor_cuit'] = prov_cuits[0]
+
+    # Comprador: cuál de NUESTRAS empresas figura en la factura
+    comprador = None
+    for oc in _COMPRADORES:
+        if oc in text:
+            comprador = oc
+            break
+    if not comprador:
+        for sin, con in _COMPRADORES_SIN_GUION.items():
+            if sin in text.replace('-', ''):
+                comprador = con
+                break
+    h['comprador_cuit'] = comprador or COMPRADOR_DEFAULT
+    h['comprador'] = _COMPRADORES.get(h['comprador_cuit'], 'MILNE SERGIO GUSTAVO')
 
     # ── Detectar facturas de VENTA (emitidas por Casa Sergio) ───────────────
     # Si el primer CUIT del documento (el del emisor/vendedor) es propio,

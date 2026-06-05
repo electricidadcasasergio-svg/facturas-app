@@ -42,7 +42,9 @@ def _migrate():
         ("facturas", "fecha_pago", "TEXT"),
         ("facturas", "tipo",         "TEXT DEFAULT 'FC'"),
         ("facturas", "archivo_path", "TEXT"),
+        ("facturas", "comprador",    "TEXT DEFAULT '20-14018158-8'"),
         ("pagos",    "moneda",       "TEXT DEFAULT 'ARS'"),
+        ("pagos",    "comprador",    "TEXT DEFAULT '20-14018158-8'"),
     ]
     with get_conn() as conn:
         for tabla, col, definicion in nuevas:
@@ -228,23 +230,24 @@ def upsert_proveedor(nombre, cuit, moneda_default='ARS'):
 
 def insert_factura(proveedor_id, numero, fecha, subtotal, iva_21, iva_105,
                    percepciones, total, moneda, tipo_cambio, archivo_nombre, cae,
-                   tipo='FC'):
+                   tipo='FC', comprador='20-14018158-8'):
     fecha_iso = _to_iso(fecha)
     with get_conn() as conn:
-        # Duplicado = mismo proveedor + mismo tipo + mismo número
+        # Duplicado = mismo comprador + proveedor + tipo + número
         existing = conn.execute("""
             SELECT id FROM facturas
             WHERE proveedor_id = ? AND numero = ? AND COALESCE(tipo,'FC') = ?
-        """, (proveedor_id, numero, tipo)).fetchone()
+              AND COALESCE(comprador,'20-14018158-8') = ?
+        """, (proveedor_id, numero, tipo, comprador)).fetchone()
         if existing:
             return None
         cur = conn.execute("""
             INSERT INTO facturas
                 (proveedor_id, numero, fecha, subtotal, iva_21, iva_105,
-                 percepciones, total, moneda, tipo_cambio, archivo_nombre, cae, tipo)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 percepciones, total, moneda, tipo_cambio, archivo_nombre, cae, tipo, comprador)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (proveedor_id, numero, fecha_iso, subtotal, iva_21, iva_105,
-              percepciones, total, moneda, tipo_cambio, archivo_nombre, cae, tipo))
+              percepciones, total, moneda, tipo_cambio, archivo_nombre, cae, tipo, comprador))
         return cur.lastrowid
 
 
@@ -293,13 +296,14 @@ def marcar_impaga(factura_id):
         )
 
 
-def insert_pago(proveedor_id, monto, fecha, descripcion='', moneda='ARS'):
-    """Registra un pago a un proveedor (en ARS o USD)."""
+def insert_pago(proveedor_id, monto, fecha, descripcion='', moneda='ARS',
+                comprador='20-14018158-8'):
+    """Registra un pago a un proveedor (en ARS o USD) por una empresa compradora."""
     with get_conn() as conn:
         conn.execute("""
-            INSERT INTO pagos (proveedor_id, monto, fecha, descripcion, moneda)
-            VALUES (?, ?, ?, ?, ?)
-        """, (proveedor_id, monto, _to_iso(fecha), descripcion, moneda))
+            INSERT INTO pagos (proveedor_id, monto, fecha, descripcion, moneda, comprador)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (proveedor_id, monto, _to_iso(fecha), descripcion, moneda, comprador))
 
 
 def delete_pago(pago_id):
@@ -308,20 +312,25 @@ def delete_pago(pago_id):
         conn.execute("DELETE FROM pagos WHERE id = ?", (pago_id,))
 
 
-def factura_ya_cargada(proveedor_cuit, numero, tipo='FC'):
+def factura_ya_cargada(proveedor_cuit, numero, tipo='FC', comprador=None):
     """
     Devuelve la factura existente (dict) si ya se cargó este comprobante
-    (mismo proveedor por CUIT + mismo número + mismo tipo), o None.
+    (mismo proveedor + número + tipo, y comprador si se indica), o None.
     """
     if not numero:
         return None
+    q = """
+        SELECT f.id, f.numero, f.fecha, f.total, f.created_at
+        FROM facturas f
+        JOIN proveedores p ON f.proveedor_id = p.id
+        WHERE p.cuit = ? AND f.numero = ? AND COALESCE(f.tipo,'FC') = ?
+    """
+    params = [proveedor_cuit, numero, tipo]
+    if comprador:
+        q += " AND COALESCE(f.comprador,'20-14018158-8') = ?"
+        params.append(comprador)
     with get_conn() as conn:
-        row = conn.execute("""
-            SELECT f.id, f.numero, f.fecha, f.total, f.created_at
-            FROM facturas f
-            JOIN proveedores p ON f.proveedor_id = p.id
-            WHERE p.cuit = ? AND f.numero = ? AND COALESCE(f.tipo,'FC') = ?
-        """, (proveedor_cuit, numero, tipo)).fetchone()
+        row = conn.execute(q, params).fetchone()
     return dict(row) if row else None
 
 
@@ -339,13 +348,19 @@ ARCHIVOS_DIR = DB_PATH.parent / 'archivos'
 ARCHIVOS_DIR.mkdir(exist_ok=True)
 
 
-def get_cuenta_corriente(proveedor_id, moneda='ARS'):
+def get_cuenta_corriente(proveedor_id, moneda='ARS', comprador=None):
     """
     Devuelve (movimientos, saldo_actual) de UNA moneda para un proveedor.
+    Si se indica comprador, filtra por esa empresa compradora.
     Movimientos ordenados por fecha: facturas (debe) + pagos (haber).
     """
+    cond_comp = ""
+    par_comp = []
+    if comprador:
+        cond_comp = " AND COALESCE(comprador,'20-14018158-8') = ?"
+        par_comp = [comprador]
     with get_conn() as conn:
-        facturas = conn.execute("""
+        facturas = conn.execute(f"""
             SELECT fecha,
                    CASE COALESCE(tipo,'FC')
                         WHEN 'NC' THEN 'N. CRÉDITO'
@@ -358,15 +373,15 @@ def get_cuenta_corriente(proveedor_id, moneda='ARS'):
                    CASE WHEN COALESCE(tipo,'FC')='NC' THEN 0.0 ELSE total END AS debe,
                    CASE WHEN COALESCE(tipo,'FC')='NC' THEN total ELSE 0.0 END AS haber,
                    id AS ref_id
-            FROM facturas WHERE proveedor_id = ? AND moneda = ?
-        """, (proveedor_id, moneda)).fetchall()
+            FROM facturas WHERE proveedor_id = ? AND moneda = ?{cond_comp}
+        """, (proveedor_id, moneda, *par_comp)).fetchall()
 
-        pagos = conn.execute("""
+        pagos = conn.execute(f"""
             SELECT fecha, 'PAGO' AS tipo,
                    COALESCE(descripcion, 'Pago') AS descripcion,
                    0.0 AS debe, monto AS haber, id AS ref_id
-            FROM pagos WHERE proveedor_id = ? AND COALESCE(moneda,'ARS') = ?
-        """, (proveedor_id, moneda)).fetchall()
+            FROM pagos WHERE proveedor_id = ? AND COALESCE(moneda,'ARS') = ?{cond_comp}
+        """, (proveedor_id, moneda, *par_comp)).fetchall()
 
     movs = [dict(r) for r in facturas] + [dict(r) for r in pagos]
     movs.sort(key=lambda x: x['fecha'] or '')
@@ -392,14 +407,16 @@ def get_monedas_proveedor(proveedor_id):
     return monedas or ['ARS']
 
 
-def get_saldos_proveedores():
+def get_saldos_proveedores(comprador=None):
     """
-    Saldo por proveedor, separado por moneda (ARS y USD):
+    Saldo por proveedor, separado por moneda (ARS y USD).
+    Si se indica comprador, considera solo las facturas/pagos de esa empresa.
     saldo = total facturas - total pagos, por cada moneda.
     """
-    # Facturas y N. Débito suman; N. Crédito resta; pagos restan.
+    cf = " WHERE COALESCE(comprador,'20-14018158-8') = ?" if comprador else ""
+    par = (comprador,) if comprador else ()
     with get_conn() as conn:
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT p.id, p.nombre, p.cuit,
                    COALESCE(f.fact_ars, 0) AS fact_ars,
                    COALESCE(f.fact_usd, 0) AS fact_usd,
@@ -414,15 +431,15 @@ def get_saldos_proveedores():
                   SUM(CASE WHEN moneda='USD' AND COALESCE(tipo,'FC')!='NC' THEN total ELSE 0 END) AS fact_usd,
                   SUM(CASE WHEN moneda='ARS' AND COALESCE(tipo,'FC')='NC'  THEN total ELSE 0 END) AS nc_ars,
                   SUM(CASE WHEN moneda='USD' AND COALESCE(tipo,'FC')='NC'  THEN total ELSE 0 END) AS nc_usd
-                FROM facturas GROUP BY proveedor_id
+                FROM facturas{cf} GROUP BY proveedor_id
             ) f ON f.proveedor_id = p.id
             LEFT JOIN (
                 SELECT proveedor_id,
                   SUM(CASE WHEN COALESCE(moneda,'ARS')='ARS' THEN monto ELSE 0 END) AS pago_ars,
                   SUM(CASE WHEN moneda='USD' THEN monto ELSE 0 END) AS pago_usd
-                FROM pagos GROUP BY proveedor_id
+                FROM pagos{cf} GROUP BY proveedor_id
             ) pg ON pg.proveedor_id = p.id
-        """).fetchall()
+        """, (*par, *par)).fetchall()
 
     result = []
     for r in rows:
