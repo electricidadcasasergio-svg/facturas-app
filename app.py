@@ -24,7 +24,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-v"
+APP_VERSION = "2026.06.04-w"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -654,11 +654,30 @@ cuentas = [
     filtro = cc2.text_input("🔎 Buscar", placeholder="proveedor, asunto o archivo…",
                             key="band_filtro")
     buscar_btn = cc3.button("🔄 Revisar correos", type="primary")
+    solo_nuevas = st.checkbox("🆕 Mostrar solo las que NO están cargadas todavía", value=False,
+                              help="Analiza cada adjunto y oculta las que ya cargaste. Tarda un poco más.")
 
     # Cachear el resultado para no reconectar en cada interacción
     @st.cache_data(show_spinner="Conectando a los correos…", ttl=300)
     def _bandeja(dias_):
         return email_facturas.fetch_bandeja(dias=dias_)
+
+    # Estado de un adjunto: extrae número/cuit/tipo y dice si ya está cargado (cacheado)
+    @st.cache_data(show_spinner=False)
+    def _estado_adjunto(datos, fn):
+        suf = Path(fn).suffix.lower()
+        if suf not in ('.pdf', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'):
+            return ('', '', 'FC')
+        with tempfile.NamedTemporaryFile(suffix=suf, delete=False) as t:
+            t.write(datos)
+            p = t.name
+        try:
+            d = extractor.extract_invoice(p)
+            return (d.get('numero', '') or '', d.get('proveedor_cuit', '') or '', d.get('tipo', 'FC'))
+        except Exception:
+            return ('', '', 'FC')
+        finally:
+            Path(p).unlink(missing_ok=True)
 
     if buscar_btn:
         _bandeja.clear()
@@ -688,9 +707,32 @@ cuentas = [
             st.warning(f"Ningún correo coincide con «{filtro}».")
             st.stop()
 
+    # Analizar estado (nueva / ya cargada) de cada adjunto si se pidió
+    estados = {}   # clave_hash -> 'nueva' | 'cargada'
+    if solo_nuevas:
+        import hashlib
+        with st.spinner("Analizando cuáles ya están cargadas…"):
+            nuevas_validos = []
+            for correo in validos:
+                hay_nueva = False
+                for fn, datos in correo['adjuntos']:
+                    num, cuit, tipo = _estado_adjunto(datos, fn)
+                    ya = db.factura_ya_cargada(cuit, num, tipo) if num else None
+                    k = hashlib.md5(datos).hexdigest()[:10]
+                    estados[k] = 'cargada' if ya else 'nueva'
+                    if estados[k] == 'nueva':
+                        hay_nueva = True
+                if hay_nueva:
+                    nuevas_validos.append(correo)
+            validos = nuevas_validos
+        if not validos:
+            st.success("🎉 No hay facturas nuevas sin cargar en el período. ¡Estás al día!")
+            st.stop()
+
     total_adj = sum(len(c['adjuntos']) for c in validos)
     extra = f" (filtrado por «{filtro}»)" if filtro else ""
-    st.success(f"📨 {len(validos)} correo(s) con {total_adj} adjunto(s) en los últimos {dias} días{extra}.")
+    estado_txt = " — solo NUEVAS" if solo_nuevas else ""
+    st.success(f"📨 {len(validos)} correo(s) con {total_adj} adjunto(s) en los últimos {dias} días{extra}{estado_txt}.")
 
     for ci, correo in enumerate(validos):
         with st.container(border=True):
@@ -703,9 +745,14 @@ cuentas = [
                 # Clave basada en el CONTENIDO del archivo (no en la posición),
                 # para que los campos no se "peguen" al filtrar/reordenar correos.
                 import hashlib
-                clave = "mail_" + hashlib.md5(datos).hexdigest()[:10]
+                kh = hashlib.md5(datos).hexdigest()[:10]
+                clave = "mail_" + kh
+                # Si analizamos estado, ocultar las ya cargadas y poner cartel a las nuevas
+                if solo_nuevas and estados.get(kh) == 'cargada':
+                    continue
+                badge = "🆕 " if estados.get(kh) == 'nueva' else ""
                 vc1, vc2 = st.columns([3, 1])
-                vc1.markdown(f"📎 `{fn}`")
+                vc1.markdown(f"{badge}📎 `{fn}`")
                 vc2.download_button("⬇️ Descargar", datos, file_name=fn,
                                     key=f"dl_{clave}")
                 ext = Path(fn).suffix.lower()
