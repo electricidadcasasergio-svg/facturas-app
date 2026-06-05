@@ -24,7 +24,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-x"
+APP_VERSION = "2026.06.04-y"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -672,7 +672,7 @@ cuentas = [
             t.write(datos)
             p = t.name
         try:
-            d = extractor.extract_invoice(p)
+            d = extractor.extract_invoice(p, permitir_ocr=False)   # sin OCR en escaneo masivo
             return (d.get('numero', '') or '', d.get('proveedor_cuit', '') or '', d.get('tipo', 'FC'))
         except Exception:
             return ('', '', 'FC')
@@ -731,7 +731,13 @@ cuentas = [
     extra = f" (filtrado por «{filtro}»)" if filtro else ""
     estado_txt = " — solo NUEVAS" if solo_nuevas else ""
     st.success(f"📨 {len(validos)} correo(s) con {total_adj} adjunto(s) en los últimos {dias} días{extra}{estado_txt}.")
+    st.caption("Tocá **📝 Procesar** en la factura que quieras cargar. (Se procesa de a una para no sobrecargar el OCR.)")
 
+    # Recordar qué adjuntos fueron abiertos para procesar (solo esos usan OCR)
+    if 'band_abiertos' not in st.session_state:
+        st.session_state.band_abiertos = set()
+
+    import hashlib
     for ci, correo in enumerate(validos):
         with st.container(border=True):
             st.markdown(
@@ -740,19 +746,25 @@ cuentas = [
                 f"**Fecha:** {correo['fecha']}  ·  📥 {correo['cuenta']}"
             )
             for ai, (fn, datos) in enumerate(correo['adjuntos']):
-                # Clave basada en el CONTENIDO del archivo (no en la posición),
-                # para que los campos no se "peguen" al filtrar/reordenar correos.
-                import hashlib
                 kh = hashlib.md5(datos).hexdigest()[:10]
                 clave = "mail_" + kh
-                # Si analizamos estado, ocultar las ya cargadas y poner cartel a las nuevas
                 if solo_nuevas and estados.get(kh) == 'cargada':
                     continue
                 badge = "🆕 " if estados.get(kh) == 'nueva' else ""
-                vc1, vc2 = st.columns([3, 1])
+                vc1, vc2, vc3 = st.columns([3, 1, 1])
                 vc1.markdown(f"{badge}📎 `{fn}`")
-                vc2.download_button("⬇️ Descargar", datos, file_name=fn,
-                                    key=f"dl_{clave}")
+                vc2.download_button("⬇️ Descargar", datos, file_name=fn, key=f"dl_{clave}")
+
+                abierto = kh in st.session_state.band_abiertos
+                if not abierto:
+                    if vc3.button("📝 Procesar", key=f"proc_{clave}"):
+                        st.session_state.band_abiertos.add(kh)
+                        st.rerun()
+                else:
+                    if vc3.button("✖ Cerrar", key=f"close_{clave}"):
+                        st.session_state.band_abiertos.discard(kh)
+                        st.rerun()
+
                 ext = Path(fn).suffix.lower()
                 with st.expander("👁️ Ver archivo adjunto"):
                     if ext in ('.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff'):
@@ -767,8 +779,10 @@ cuentas = [
                         st.caption("Si no se ve, usá el botón Descargar.")
                     else:
                         st.info("Vista previa no disponible para este tipo de archivo.")
-                procesar_comprobante(fn, datos,
-                                     key_prefix=clave, expandido=False)
+
+                # Solo se procesa (y se usa OCR) la factura que el usuario abrió
+                if abierto:
+                    procesar_comprobante(fn, datos, key_prefix=clave, expandido=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1124,7 +1138,7 @@ elif page == "✅ Control":
                         t.write(datos)
                         p = t.name
                     try:
-                        return extractor.extract_invoice(p).get('numero', '') or ''
+                        return extractor.extract_invoice(p, permitir_ocr=False).get('numero', '') or ''
                     except Exception:
                         return ''
                     finally:
@@ -1145,32 +1159,50 @@ elif page == "✅ Control":
                     barra.progress(i / len(adjs), text=f"Analizando {i} de {len(adjs)} adjuntos…")
                 barra.empty()
 
-                encontrados = 0
-                no_encontradas = []
-                vistos = set()
+                # Guardar resultados en sesión (para que no desaparezcan al recargar)
+                matches, no_encontradas = [], []
                 for _, row in faltan_cargar.iterrows():
-                    clave = row['_clave']
                     etiqueta = str(row[col_num])
                     if col_prov != "(ninguna)":
                         etiqueta += f"  —  {row[col_prov]}"
-
-                    hit = indice.get(clave)
+                    hit = indice.get(row['_clave'])
                     if hit:
-                        encontrados += 1
                         c, fn, datos = hit
-                        st.markdown(f"✅ **{etiqueta}** → en 📥 {c['cuenta']}  ·  _{c['asunto'][:60]}_")
-                        import hashlib
-                        kclave = "ctrlmail_" + hashlib.md5(datos).hexdigest()[:10]
-                        procesar_comprobante(fn, datos, key_prefix=kclave, expandido=False)
+                        matches.append({'etiqueta': etiqueta, 'cuenta': c['cuenta'],
+                                        'asunto': c['asunto'][:60], 'fn': fn, 'datos': datos})
                     else:
                         no_encontradas.append(etiqueta)
+                st.session_state.ctrl_matches = matches
+                st.session_state.ctrl_no_enc = no_encontradas
 
-                st.info(f"📨 Encontradas en el correo: **{encontrados}** de {len(faltan_cargar)}.")
-                if no_encontradas:
-                    with st.expander(f"❔ No encontradas en el correo ({len(no_encontradas)})"):
+            # Render de resultados (persisten entre recargas; se procesan de a uno)
+            matches = st.session_state.get('ctrl_matches')
+            if matches is not None:
+                st.info(f"📨 Encontradas en el correo: **{len(matches)}** de {len(faltan_cargar)}.")
+                if 'ctrl_abiertos' not in st.session_state:
+                    st.session_state.ctrl_abiertos = set()
+                import hashlib
+                for mm in matches:
+                    kh = hashlib.md5(mm['datos']).hexdigest()[:10]
+                    with st.container(border=True):
+                        cca, ccb = st.columns([4, 1])
+                        cca.markdown(f"✅ **{mm['etiqueta']}** → 📥 {mm['cuenta']}  ·  _{mm['asunto']}_")
+                        if kh not in st.session_state.ctrl_abiertos:
+                            if ccb.button("📝 Procesar", key=f"cproc_{kh}"):
+                                st.session_state.ctrl_abiertos.add(kh)
+                                st.rerun()
+                        else:
+                            if ccb.button("✖ Cerrar", key=f"cclose_{kh}"):
+                                st.session_state.ctrl_abiertos.discard(kh)
+                                st.rerun()
+                            procesar_comprobante(mm['fn'], mm['datos'],
+                                                 key_prefix="ctrlmail_" + kh, expandido=True)
+                no_enc = st.session_state.get('ctrl_no_enc', [])
+                if no_enc:
+                    with st.expander(f"❔ No encontradas en el correo ({len(no_enc)})"):
                         st.caption("Pedíselas al proveedor o cargalas a mano. "
                                    "(Puede que el correo sea más viejo que el período elegido.)")
-                        for e in no_encontradas:
+                        for e in no_enc:
                             st.markdown(f"- {e}")
 
     # Extra: cargadas en la app que NO están en la gestión (posible error de carga)

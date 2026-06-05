@@ -85,15 +85,20 @@ def quick_get_cuit(pdf_path):
         return None
 
 
-def extract_invoice(pdf_path, config=None):
+def extract_invoice(pdf_path, config=None, permitir_ocr=True):
     """
     Acepta PDF o imagen (JPG/PNG). Detecta automáticamente.
     config: dict con perfil del proveedor (aprendido de facturas anteriores).
+    permitir_ocr: si es False, NO usa OCR (Tesseract). Útil para escaneos masivos
+                  (detectar duplicados) donde lanzar Tesseract muchas veces seguidas
+                  puede hacerlo crashear (error 0xc0000142 en Windows).
     """
     path = Path(pdf_path)
     if path.suffix.lower() in IMAGE_EXTS:
+        if not permitir_ocr:
+            return {'archivo_nombre': path.name, 'items': []}
         return _extract_from_image(path)
-    return _extract_from_pdf(path, config=config)
+    return _extract_from_pdf(path, config=config, permitir_ocr=permitir_ocr)
 
 
 def _set_tesseract():
@@ -176,7 +181,7 @@ def _ocr_pdf(path):
     return _colapsar_espacios_numeros('\n'.join(textos))
 
 
-def _extract_from_pdf(path, config=None):
+def _extract_from_pdf(path, config=None, permitir_ocr=True):
     """Extracción estándar desde PDF con pdfplumber; si el texto está roto, usa OCR."""
     with pdfplumber.open(path) as pdf:
         pages_text   = [p.extract_text() or '' for p in pdf.pages]
@@ -186,7 +191,7 @@ def _extract_from_pdf(path, config=None):
     all_tables = [t for page in pages_tables for t in page]
 
     # Si el texto del PDF está degradado (espacios entre letras), reintentar con OCR
-    if _texto_degradado(full_text):
+    if permitir_ocr and _texto_degradado(full_text):
         try:
             ocr_text = _ocr_pdf(path)
             if ocr_text and not _texto_degradado(ocr_text):
