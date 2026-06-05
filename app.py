@@ -603,21 +603,51 @@ def cargar_factura_auto(nombre, datos_bytes):
         return {'estado': 'error', 'nombre': nombre, 'detalle': str(e)}
 
 
+_EXTS_DOC = ('.pdf', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff')
+
+
+def _adjuntos_de_eml(data):
+    """Extrae los adjuntos PDF/imagen de un correo .eml."""
+    import email
+    out = []
+    try:
+        msg = email.message_from_bytes(data)
+        for part in msg.walk():
+            if part.get_content_maintype() == 'multipart':
+                continue
+            fn = part.get_filename()
+            if not fn:
+                continue
+            fn = email_facturas._decode(fn)
+            if Path(fn).suffix.lower() in _EXTS_DOC:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    out.append((fn, payload))
+    except Exception:
+        pass
+    return out
+
+
 def archivos_desde_subida(uploaded):
-    """Expande los archivos subidos: si hay un ZIP, devuelve su contenido (PDF/imágenes)."""
-    exts = ('.pdf', '.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff')
+    """Expande lo subido: ZIP, .eml (correo) o archivos sueltos → lista de (nombre, bytes)."""
     archivos = []
     for f in uploaded:
-        if f.name.lower().endswith('.zip'):
+        low = f.name.lower()
+        if low.endswith('.zip'):
             try:
                 with zipfile.ZipFile(io.BytesIO(f.getvalue())) as z:
                     for info in z.infolist():
                         if info.is_dir():
                             continue
-                        if Path(info.filename).suffix.lower() in exts:
+                        ext = Path(info.filename).suffix.lower()
+                        if ext in _EXTS_DOC:
                             archivos.append((Path(info.filename).name, z.read(info)))
+                        elif ext == '.eml':
+                            archivos += _adjuntos_de_eml(z.read(info))
             except Exception as e:
                 st.error(f"No se pudo abrir el ZIP {f.name}: {e}")
+        elif low.endswith('.eml'):
+            archivos += _adjuntos_de_eml(f.getvalue())
         else:
             archivos.append((f.name, f.getvalue()))
     return archivos
@@ -719,8 +749,8 @@ elif page == "📤 Subir Facturas":
     _page_header("📤", "Subir Facturas", "PDF, foto, o un ZIP con muchas facturas")
 
     uploaded = st.file_uploader(
-        "Arrastrá los archivos acá (PDF, JPG, PNG o un ZIP con varias facturas)",
-        type=["pdf", "jpg", "jpeg", "png", "zip"],
+        "Arrastrá facturas (PDF/JPG/PNG), correos (.eml) o un ZIP con todo eso",
+        type=["pdf", "jpg", "jpeg", "png", "zip", "eml"],
         accept_multiple_files=True,
     )
 
