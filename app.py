@@ -24,7 +24,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-u"
+APP_VERSION = "2026.06.04-v"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -285,18 +285,46 @@ def generar_pdf_tabla(df, columnas, titulo, subtitulo=""):
     return bytes(pdf.output())
 
 
-# ── Lector de tablas (Excel/CSV) silenciando avisos de xlrd ───────────────────
+# ── Lector de tablas (Excel/CSV) ──────────────────────────────────────────────
+
+def _leer_xls_legacy(archivo):
+    """Lee un .xls (BIFF) con xlrd, pasándole un logfile propio para que NUNCA
+    escriba en stdout (eso causaba WinError 233 en el servidor)."""
+    import xlrd
+    from datetime import datetime
+    data = archivo.getvalue() if hasattr(archivo, 'getvalue') else archivo.read()
+    libro = xlrd.open_workbook(file_contents=data, logfile=io.StringIO())
+    hoja = libro.sheet_by_index(0)
+
+    def _celda(c):
+        t, v = c.ctype, c.value
+        if t == 0 or t == 6:          # vacía / blank
+            return ''
+        if t == 2:                     # número
+            return str(int(v)) if float(v).is_integer() else str(v)
+        if t == 3:                     # fecha
+            try:
+                return datetime(*xlrd.xldate_as_tuple(v, libro.datemode)).strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                return str(v)
+        return str(v)
+
+    filas = [[_celda(hoja.cell(r, col)) for col in range(hoja.ncols)]
+             for r in range(hoja.nrows)]
+    if not filas:
+        return pd.DataFrame()
+    return pd.DataFrame(filas[1:], columns=filas[0])
+
 
 def leer_tabla(archivo):
-    """Lee xlsx/xls/csv como texto. Silencia la salida de xlrd (evita WinError 233)."""
+    """Lee xlsx/xls/csv como texto."""
     nombre = archivo.name.lower()
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        if nombre.endswith('.csv'):
-            return pd.read_csv(archivo, sep=None, engine='python', dtype=str)
-        elif nombre.endswith('.xls'):
-            return pd.read_excel(archivo, dtype=str, engine='xlrd')
-        else:
-            return pd.read_excel(archivo, dtype=str, engine='openpyxl')
+    if nombre.endswith('.csv'):
+        return pd.read_csv(archivo, sep=None, engine='python', dtype=str)
+    elif nombre.endswith('.xls'):
+        return _leer_xls_legacy(archivo)
+    else:
+        return pd.read_excel(archivo, dtype=str, engine='openpyxl')
 
 
 # ── Procesar y guardar un comprobante (reutilizable: subir y bandeja mail) ────
