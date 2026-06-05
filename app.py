@@ -1,4 +1,6 @@
 import base64
+import io
+import contextlib
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -22,7 +24,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-t"
+APP_VERSION = "2026.06.04-u"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -281,6 +283,20 @@ def generar_pdf_tabla(df, columnas, titulo, subtitulo=""):
         fill = not fill
 
     return bytes(pdf.output())
+
+
+# ── Lector de tablas (Excel/CSV) silenciando avisos de xlrd ───────────────────
+
+def leer_tabla(archivo):
+    """Lee xlsx/xls/csv como texto. Silencia la salida de xlrd (evita WinError 233)."""
+    nombre = archivo.name.lower()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        if nombre.endswith('.csv'):
+            return pd.read_csv(archivo, sep=None, engine='python', dtype=str)
+        elif nombre.endswith('.xls'):
+            return pd.read_excel(archivo, dtype=str, engine='xlrd')
+        else:
+            return pd.read_excel(archivo, dtype=str, engine='openpyxl')
 
 
 # ── Procesar y guardar un comprobante (reutilizable: subir y bandeja mail) ────
@@ -889,13 +905,7 @@ elif page == "✅ Control":
 
     # Leer el archivo
     try:
-        nombre_low = archivo.name.lower()
-        if nombre_low.endswith('.csv'):
-            df_g = pd.read_csv(archivo, sep=None, engine='python', dtype=str)
-        elif nombre_low.endswith('.xls'):
-            df_g = pd.read_excel(archivo, dtype=str, engine='xlrd')
-        else:
-            df_g = pd.read_excel(archivo, dtype=str, engine='openpyxl')
+        df_g = leer_tabla(archivo)
     except ImportError:
         st.error(
             "Falta una librería para leer este Excel. En la PC del servidor:\n"
@@ -1508,13 +1518,7 @@ elif page == "📚 Catálogos":
                                type=["xlsx", "xls", "csv"], key="cat_file")
     if archivo and cuit_cat:
         try:
-            low = archivo.name.lower()
-            if low.endswith('.csv'):
-                dfc = pd.read_csv(archivo, sep=None, engine='python', dtype=str)
-            elif low.endswith('.xls'):
-                dfc = pd.read_excel(archivo, dtype=str, engine='xlrd')
-            else:
-                dfc = pd.read_excel(archivo, dtype=str, engine='openpyxl')
+            dfc = leer_tabla(archivo)
         except Exception as e:
             st.error(f"No se pudo leer el archivo: {e}")
             st.stop()
