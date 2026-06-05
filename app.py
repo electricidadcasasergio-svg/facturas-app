@@ -25,7 +25,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.05-g"
+APP_VERSION = "2026.06.05-h"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -328,6 +328,62 @@ def leer_tabla(archivo):
         return pd.read_excel(archivo, dtype=str, engine='openpyxl')
 
 
+def leer_catalogo_filas(archivo):
+    """
+    Lee una lista de precios con VARIAS solapas (formato Coresa) y encabezado que
+    no está en la primera fila. Devuelve [(codigo, descripcion, precio), ...] de
+    todas las solapas que tengan columnas SKU y DESCRIPCION.
+    """
+    nombre = archivo.name.lower()
+    if nombre.endswith('.csv') or nombre.endswith('.xls'):
+        return None   # formato simple → usar el flujo manual
+
+    excluir = ('COTIZADOR', 'VARIACION', 'SAP', 'SIN VTA', 'SINVTA')
+    filas = []
+    try:
+        xls = pd.ExcelFile(io.BytesIO(archivo.getvalue()), engine='openpyxl')
+    except Exception:
+        return None
+    if len(xls.sheet_names) < 2:
+        return None   # una sola solapa → flujo manual
+
+    for sh in xls.sheet_names:
+        if any(x in sh.upper() for x in excluir):
+            continue
+        raw = pd.read_excel(xls, sheet_name=sh, header=None, dtype=str).fillna('')
+        hdr = None
+        for i in range(min(8, len(raw))):
+            vals = [str(x).strip().upper() for x in raw.iloc[i].tolist()]
+            if 'SKU' in vals and any('DESCRIP' in v for v in vals):
+                hdr = i
+                break
+        if hdr is None:
+            continue
+        H = [str(x).strip().upper() for x in raw.iloc[hdr].tolist()]
+        def _idx(key):
+            for j, h in enumerate(H):
+                if key in h:
+                    return j
+            return None
+        cs, cd = _idx('SKU'), _idx('DESCRIP')
+        cp = _idx('PRECIO DE LISTA') or _idx('PRECIO')
+        if cs is None or cd is None:
+            continue
+        for r in range(hdr + 1, len(raw)):
+            cod = str(raw.iat[r, cs]).strip()
+            des = str(raw.iat[r, cd]).strip()
+            if not cod or not des or cod.upper() in ('SKU', 'ZZZZ'):
+                continue
+            pre = 0.0
+            if cp is not None:
+                try:
+                    pre = float(re.sub(r'[^\d.]', '', str(raw.iat[r, cp])) or 0)
+                except Exception:
+                    pre = 0.0
+            filas.append((cod, des, pre))
+    return filas if filas else None
+
+
 # ── Procesar y guardar un comprobante (reutilizable: subir y bandeja mail) ────
 
 _ITEM_COLS = ['sku', 'descripcion', 'cantidad', 'precio_unit',
@@ -390,10 +446,13 @@ def procesar_comprobante(nombre, datos_bytes, key_prefix, expandido=True):
     n_match = 0
     if catalogo:
         for it in items:
-            desc = it.get('descripcion', '')
-            m = db.match_codigo(desc, catalogo)
+            # No pisar un código ya detectado por el parser (ej. Coresa);
+            # solo completar cuando el SKU viene vacío o provisorio (ej. Argenplas).
+            if str(it.get('sku', '')).strip() and not it.get('sku_provisorio'):
+                continue
+            m = db.match_codigo(it.get('descripcion', ''), catalogo)
             if m:
-                it['sku'] = m[0]            # código del proveedor
+                it['sku'] = m[0]
                 n_match += 1
     label = (
         f"✅ {nombre}  —  {_TIPO_LABEL.get(tipo_doc, 'Factura')}  |  "
@@ -566,6 +625,8 @@ def cargar_factura_auto(nombre, datos_bytes):
     catalogo = db.get_catalogo(prov_cuit) if prov_cuit else []
     if catalogo:
         for it in items:
+            if str(it.get('sku', '')).strip() and not it.get('sku_provisorio'):
+                continue
             m = db.match_codigo(it.get('descripcion', ''), catalogo)
             if m:
                 it['sku'] = m[0]
@@ -1831,9 +1892,20 @@ elif page == "📚 Catálogos":
             st.info(f"📚 Este proveedor ya tiene **{n_actual}** productos en el catálogo. "
                     "Si subís una lista nueva, reemplaza la anterior.")
 
-    archivo = st.file_uploader("Lista de precios (Excel o CSV)",
+    archivo = st.file_uploader("Lista de precios (Excel o CSV). Soporta listas con varias solapas (formato Coresa).",
                                type=["xlsx", "xls", "csv"], key="cat_file")
     if archivo and cuit_cat:
+        # Si es una lista multi-solapa (formato Coresa), leerla directamente
+        filas_multi = leer_catalogo_filas(archivo)
+        if filas_multi:
+            st.success(f"📑 Lista con varias solapas detectada: **{len(filas_multi)}** productos.")
+            st.dataframe(pd.DataFrame(filas_multi[:8], columns=['Código', 'Descripción', 'Precio']),
+                         use_container_width=True, hide_index=True)
+            if st.button("💾 Guardar catálogo", type="primary"):
+                n = db.guardar_catalogo(cuit_cat, filas_multi)
+                st.success(f"✅ Catálogo guardado: **{n}** productos para el CUIT {cuit_cat}.")
+            st.stop()
+
         try:
             dfc = leer_tabla(archivo)
         except Exception as e:

@@ -1277,6 +1277,7 @@ def _items_argenplas(text):
             'precio_neto_unit': unit,
             'iva_pct':          21.0,
             'subtotal_siva':    subtotal,
+            'sku_provisorio':   True,   # ARGENPLAS no trae código → el catálogo lo completa
         })
 
     return items
