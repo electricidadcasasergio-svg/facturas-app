@@ -24,7 +24,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-z"
+APP_VERSION = "2026.06.05-a"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -656,13 +656,16 @@ cuentas = [
     dias = cc2.selectbox("Período", [30, 60, 90, 180, 365], index=2, key="band_dias",
                          format_func=lambda d: (f"Últimos {d} días" if d < 365 else "Último año"))
     buscar_btn = cc3.button("🔄 Buscar", type="primary")
-    solo_nuevas = st.checkbox("🆕 Mostrar solo las que NO están cargadas todavía", value=False,
-                              help="Analiza cada adjunto y oculta las que ya cargaste. Tarda un poco más.")
+    fc1, fc2 = st.columns(2)
+    solo_facturas = fc1.checkbox("📄 Solo facturas y notas (ignorar órdenes/cotizaciones/remitos)",
+                                 value=True)
+    solo_nuevas = fc2.checkbox("🆕 Solo las que NO están cargadas todavía", value=False,
+                               help="Analiza cada adjunto y oculta las que ya cargaste. Tarda un poco más.")
 
-    # Cachear el resultado por (días, texto) para no reconectar en cada interacción
+    # Cachear el resultado por (días, texto, solo_facturas) para no reconectar en cada interacción
     @st.cache_data(show_spinner="Buscando en los correos…", ttl=300)
-    def _bandeja(dias_, texto_):
-        return email_facturas.fetch_bandeja(dias=dias_, texto=texto_)
+    def _bandeja(dias_, texto_, solo_fac_):
+        return email_facturas.fetch_bandeja(dias=dias_, texto=texto_, solo_facturas=solo_fac_)
 
     # Estado de un adjunto: extrae número/cuit/tipo y dice si ya está cargado (cacheado)
     @st.cache_data(show_spinner=False)
@@ -682,7 +685,7 @@ cuentas = [
             Path(p).unlink(missing_ok=True)
 
     if buscar_btn:
-        st.session_state.band_buscado = (dias, filtro)
+        st.session_state.band_buscado = (dias, filtro, solo_facturas)
         _bandeja.clear()
 
     busqueda = st.session_state.get('band_buscado')
@@ -691,8 +694,8 @@ cuentas = [
                 "Dejá el buscador vacío solo si querés ver todos.")
         st.stop()
 
-    dias_q, filtro_q = busqueda
-    correos = _bandeja(dias_q, filtro_q)
+    dias_q, filtro_q, solo_fac_q = busqueda
+    correos = _bandeja(dias_q, filtro_q, solo_fac_q)
 
     errores = [c for c in correos if c.get('error')]
     validos = [c for c in correos if not c.get('error')]

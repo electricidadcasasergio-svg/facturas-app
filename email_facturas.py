@@ -30,6 +30,31 @@ def _decode(s):
         return str(s)
 
 
+import re as _re
+
+# Palabras de asunto que indican un comprobante (factura / nota de crédito-débito)
+_RX_COMPROBANTE = _re.compile(
+    r'(factura|comprob|f\.?\s?c\.?\b|\bfc\b|\bfca\b|'
+    r'nota\s+de\s+cr[eé]dito|nota\s+de\s+d[eé]bito|\bnota\s+cr|\bnota\s+deb|\bnc\b|\bnd\b)',
+    _re.IGNORECASE
+)
+# Palabras que descartan el correo (no es una factura de compra)
+_RX_NO_COMPROBANTE = _re.compile(
+    r'(orden\s+de\s+venta|nota\s+de\s+venta|cotiza|presupuesto|remito|'
+    r'listo\s+para\s+retirar|pedido|orden\s+de\s+compra|recibo|comprobante\s+de\s+pago|'
+    r'transferencia|resumen|estado\s+de\s+cuenta)',
+    _re.IGNORECASE
+)
+
+
+def _es_comprobante(asunto):
+    """True si el asunto parece una factura/nota de crédito-débito (y no orden/cotización/etc.)."""
+    a = asunto or ''
+    if _RX_NO_COMPROBANTE.search(a):
+        return False
+    return bool(_RX_COMPROBANTE.search(a))
+
+
 def get_cuentas():
     """Lee las cuentas configuradas desde st.secrets. Devuelve lista de dicts."""
     try:
@@ -41,13 +66,14 @@ def get_cuentas():
         return []
 
 
-def fetch_bandeja(cuentas=None, dias=30, max_por_cuenta=80, texto=''):
+def fetch_bandeja(cuentas=None, dias=30, max_por_cuenta=80, texto='', solo_facturas=True):
     """
     Devuelve una lista de correos (más nuevos primero) con adjuntos de factura.
     Cada item: {cuenta, remitente, asunto, fecha, adjuntos:[(nombre, bytes)], error?}
 
-    texto: si se indica, filtra en Gmail por ese término (remitente/asunto/cuerpo).
-           Ej: 'coresa' → solo correos de Coresa. Permite ampliar el rango sin traer todo.
+    texto: filtra en Gmail por ese término (remitente/asunto/cuerpo). Ej: 'coresa'.
+    solo_facturas: si True, restringe a comprobantes (factura / nota de crédito / débito)
+                   y excluye órdenes de venta, cotizaciones, presupuestos, remitos, etc.
     """
     if cuentas is None:
         cuentas = get_cuentas()
@@ -78,6 +104,12 @@ def fetch_bandeja(cuentas=None, dias=30, max_por_cuenta=80, texto=''):
                 if not md or not md[0]:
                     continue
                 msg = email.message_from_bytes(md[0][1])
+                asunto = _decode(msg.get('Subject', '(sin asunto)'))
+
+                # Filtro por asunto: solo comprobantes (factura / nota de crédito-débito)
+                if solo_facturas and not _es_comprobante(asunto):
+                    continue
+
                 adjuntos = []
                 for part in msg.walk():
                     if part.get_content_maintype() == 'multipart':
@@ -94,7 +126,7 @@ def fetch_bandeja(cuentas=None, dias=30, max_por_cuenta=80, texto=''):
                     resultados.append({
                         'cuenta':    usuario,
                         'remitente': _decode(msg.get('From', '')),
-                        'asunto':    _decode(msg.get('Subject', '(sin asunto)')),
+                        'asunto':    asunto,
                         'fecha':     _decode(msg.get('Date', '')),
                         'adjuntos':  adjuntos,
                     })
