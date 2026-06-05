@@ -810,11 +810,29 @@ def _items_coresa(tables, text):
         )
 
         def _split_cod_desc(blob):
-            """Separa 'P48-605 PANEL PRO...' → ('P48-605', 'PANEL PRO...')."""
-            parts = blob.strip().split(None, 1)
-            if len(parts) == 2:
-                return parts[0], parts[1].strip()
-            return blob.strip(), ''
+            """
+            Separa código + descripción en facturas Coresa.
+            El código son las palabras iniciales que forman parte del código del
+            producto (modelo + specs con números), ej:
+              'ITM-63 2P C16 4.5KA Interruptor...' → ('ITM-63 2P C16 4.5KA', 'Interruptor...')
+              'SDIL 0,5X3,0X100 DESTORNILLADOR...' → ('SDIL 0,5X3,0X100', 'DESTORNILLADOR...')
+              'P48-605-PMMA-4800 PANEL PRO...'     → ('P48-605-PMMA-4800', 'PANEL PRO...')
+            Regla: el 1er token siempre es código; los siguientes se suman mientras
+            tengan algún dígito; corta en la primera palabra descriptiva (sin números).
+            """
+            toks = blob.strip().split()
+            if not toks:
+                return '', ''
+            cod = [toks[0]]
+            i = 1
+            while i < len(toks):
+                t = toks[i]
+                if re.search(r'\d', t):       # token con número → parte del código
+                    cod.append(t)
+                    i += 1
+                else:
+                    break                      # palabra descriptiva → fin del código
+            return ' '.join(cod), ' '.join(toks[i:]).strip()
 
         def _ncor(s):
             """Número Coresa: la coma SIEMPRE es decimal (ej '60,550'=60.55, '1.816,50'=1816.50)."""
