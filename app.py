@@ -24,7 +24,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.04-w"
+APP_VERSION = "2026.06.04-x"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -711,20 +711,18 @@ cuentas = [
     estados = {}   # clave_hash -> 'nueva' | 'cargada'
     if solo_nuevas:
         import hashlib
-        with st.spinner("Analizando cuáles ya están cargadas…"):
-            nuevas_validos = []
-            for correo in validos:
-                hay_nueva = False
-                for fn, datos in correo['adjuntos']:
-                    num, cuit, tipo = _estado_adjunto(datos, fn)
-                    ya = db.factura_ya_cargada(cuit, num, tipo) if num else None
-                    k = hashlib.md5(datos).hexdigest()[:10]
-                    estados[k] = 'cargada' if ya else 'nueva'
-                    if estados[k] == 'nueva':
-                        hay_nueva = True
-                if hay_nueva:
-                    nuevas_validos.append(correo)
-            validos = nuevas_validos
+        adjs = [(co, fn, datos) for co in validos for fn, datos in co['adjuntos']]
+        barra = st.progress(0.0, text=f"Analizando 0 de {len(adjs)} adjuntos…")
+        for i, (co, fn, datos) in enumerate(adjs, 1):
+            num, cuit, tipo = _estado_adjunto(datos, fn)
+            ya = db.factura_ya_cargada(cuit, num, tipo) if num else None
+            estados[hashlib.md5(datos).hexdigest()[:10]] = 'cargada' if ya else 'nueva'
+            barra.progress(i / len(adjs), text=f"Analizando {i} de {len(adjs)} adjuntos…")
+        barra.empty()
+        # quedarse solo con correos que tengan al menos un adjunto nuevo
+        validos = [co for co in validos
+                   if any(estados.get(hashlib.md5(d).hexdigest()[:10]) == 'nueva'
+                          for _, d in co['adjuntos'])]
         if not validos:
             st.success("🎉 No hay facturas nuevas sin cargar en el período. ¡Estás al día!")
             st.stop()
@@ -1132,17 +1130,20 @@ elif page == "✅ Control":
                     finally:
                         Path(p).unlink(missing_ok=True)
 
-                with st.spinner("Analizando los adjuntos de los correos…"):
+                with st.spinner("Conectando a los correos…"):
                     correos_m = [c for c in email_facturas.fetch_bandeja(dias=dias_mail)
                                  if not c.get('error')]
-                    # Indexar por clave (sucursal, secuencia) según el número del PDF
-                    indice = {}
-                    for c in correos_m:
-                        for fn, datos in c.get('adjuntos', []):
-                            num = _num_de_adjunto(datos, fn)
-                            clave = _clave_app(num) if num else None
-                            if clave and clave not in indice:
-                                indice[clave] = (c, fn, datos)
+                # Indexar por clave (sucursal, secuencia) según el número del PDF
+                adjs = [(c, fn, datos) for c in correos_m for fn, datos in c.get('adjuntos', [])]
+                indice = {}
+                barra = st.progress(0.0, text=f"Analizando 0 de {len(adjs)} adjuntos…")
+                for i, (c, fn, datos) in enumerate(adjs, 1):
+                    num = _num_de_adjunto(datos, fn)
+                    clave = _clave_app(num) if num else None
+                    if clave and clave not in indice:
+                        indice[clave] = (c, fn, datos)
+                    barra.progress(i / len(adjs), text=f"Analizando {i} de {len(adjs)} adjuntos…")
+                barra.empty()
 
                 encontrados = 0
                 no_encontradas = []
