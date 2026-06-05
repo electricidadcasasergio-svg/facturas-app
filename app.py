@@ -24,7 +24,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.05-b"
+APP_VERSION = "2026.06.05-c"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -334,34 +334,44 @@ _ITEM_COLS = ['sku', 'descripcion', 'cantidad', 'precio_unit',
 _TIPO_LABEL = {'FC': 'Factura', 'ND': 'Nota de Débito', 'NC': 'Nota de Crédito'}
 
 
-def procesar_comprobante(nombre, datos_bytes, key_prefix, expandido=True):
-    """Procesa un PDF/imagen (bytes), muestra la previsualización editable y permite guardar."""
+@st.cache_data(show_spinner=False)
+def _extraer_factura(datos_bytes, nombre):
+    """Extrae los datos de un comprobante (cacheado por contenido → no re-hace OCR)."""
     suffix = Path(nombre).suffix.lower()
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(datos_bytes)
         tmp_path = tmp.name
-
     try:
         cuit_hint = extractor.quick_get_cuit(tmp_path)
-    except AttributeError:
+    except Exception:
         cuit_hint = None
     proveedor_config = db.get_proveedor_config(cuit_hint) if cuit_hint else None
-    nombre_guardado  = (db.get_proveedor_nombre_por_cuit(cuit_hint)
-                        if cuit_hint and hasattr(db, 'get_proveedor_nombre_por_cuit')
-                        else None)
+    try:
+        data = extractor.extract_invoice(tmp_path, config=proveedor_config)
+        data['archivo_nombre'] = nombre
+        return data, None
+    except Exception as e:
+        return None, str(e)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
+
+def procesar_comprobante(nombre, datos_bytes, key_prefix, expandido=True):
+    """Procesa un PDF/imagen (bytes), muestra la previsualización editable y permite guardar."""
     with st.spinner(f"Procesando **{nombre}**…"):
-        try:
-            data = extractor.extract_invoice(tmp_path, config=proveedor_config)
-            data['archivo_nombre'] = nombre
-            error = None
-        except Exception as e:
-            data, error = None, str(e)
-    Path(tmp_path).unlink(missing_ok=True)
+        data, error = _extraer_factura(datos_bytes, nombre)
 
     if error:
         st.error(f"❌ **{nombre}**: {error}")
         return
+
+    import copy
+    data = copy.deepcopy(data)   # no mutar el objeto cacheado
+    cuit_hint = data.get('proveedor_cuit', '')
+    proveedor_config = db.get_proveedor_config(cuit_hint) if cuit_hint else None
+    nombre_guardado  = (db.get_proveedor_nombre_por_cuit(cuit_hint)
+                        if cuit_hint and hasattr(db, 'get_proveedor_nombre_por_cuit')
+                        else None)
 
     items    = data.get('items', [])
     tipo_doc = data.get('tipo', 'FC')
