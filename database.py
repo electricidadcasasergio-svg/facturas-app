@@ -466,6 +466,22 @@ def get_resumen_pagos():
     return dict(row)
 
 
+def delete_facturas_proveedor(proveedor_id, comprador=None):
+    """Elimina TODAS las facturas (y sus ítems) de un proveedor. Opcional por empresa."""
+    cond, par = "", []
+    if comprador:
+        cond = " AND COALESCE(comprador,'20-14018158-8') = ?"
+        par = [comprador]
+    with get_conn() as conn:
+        ids = [r['id'] for r in conn.execute(
+            f"SELECT id FROM facturas WHERE proveedor_id = ?{cond}",
+            (proveedor_id, *par)).fetchall()]
+        for fid in ids:
+            conn.execute("DELETE FROM items WHERE factura_id = ?", (fid,))
+            conn.execute("DELETE FROM facturas WHERE id = ?", (fid,))
+    return len(ids)
+
+
 def delete_factura(factura_id):
     """Elimina una factura y todos sus ítems."""
     with get_conn() as conn:

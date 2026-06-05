@@ -25,7 +25,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.05-h"
+APP_VERSION = "2026.06.05-i"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -1216,6 +1216,19 @@ elif page == "📄 Facturas":
             else:
                 db.delete_factura(fac_id_del)
                 st.success("✅ Factura eliminada correctamente.")
+                st.rerun()
+
+        # Borrar TODAS las de un proveedor (útil para recargar un histórico)
+        if prov_sel != "Todos" and hasattr(db, 'delete_facturas_proveedor'):
+            st.markdown("---")
+            st.markdown(f"**Borrar TODAS las facturas de {prov_sel}**")
+            st.caption("Para recargar el histórico de un proveedor desde cero (ej: con un ZIP).")
+            confirmar = st.checkbox(f"Confirmo que quiero borrar TODAS las de {prov_sel}",
+                                    key="conf_del_prov")
+            if st.button("🗑️ Borrar todas las del proveedor", disabled=not confirmar,
+                         key="del_prov_all"):
+                n = db.delete_facturas_proveedor(prov_map[prov_sel])
+                st.success(f"✅ Se eliminaron {n} comprobante(s) de {prov_sel}.")
                 st.rerun()
 
 
