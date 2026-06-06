@@ -513,6 +513,18 @@ def get_resumen_dash_proveedor(proveedor_id):
     return dict(r)
 
 
+def eliminar_proveedor(proveedor_id):
+    """Borra un proveedor y todas sus facturas, ítems y pagos."""
+    with get_conn() as conn:
+        fids = [r['id'] for r in conn.execute(
+            "SELECT id FROM facturas WHERE proveedor_id = ?", (proveedor_id,)).fetchall()]
+        for fid in fids:
+            conn.execute("DELETE FROM items WHERE factura_id = ?", (fid,))
+        conn.execute("DELETE FROM facturas   WHERE proveedor_id = ?", (proveedor_id,))
+        conn.execute("DELETE FROM pagos      WHERE proveedor_id = ?", (proveedor_id,))
+        conn.execute("DELETE FROM proveedores WHERE id = ?", (proveedor_id,))
+
+
 def get_proveedores_sin_cuit():
     """Devuelve proveedores cuyo CUIT NO es válido (formato XX-XXXXXXXX-X)."""
     with get_conn() as conn:

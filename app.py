@@ -25,7 +25,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.06-d"
+APP_VERSION = "2026.06.06-e"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -2057,6 +2057,21 @@ elif page == "🏢 Proveedores":
     if not proveedores:
         st.info("No hay proveedores cargados aún.")
         st.stop()
+
+    # 🗑️ Eliminar proveedores que NO son de compra (bancos, etc.)
+    if hasattr(db, 'eliminar_proveedor'):
+        with st.expander("🗑️ Eliminar proveedores que no corresponden (bancos, varios, etc.)"):
+            st.caption("Elegí los que NO son proveedores de compra. Se borran ellos y sus facturas.")
+            _pmap = {f"{p['nombre']}  ({p['cuit']})": p['id'] for p in proveedores}
+            elegidos = st.multiselect("Proveedores a eliminar", list(_pmap.keys()), key="prov_del_multi")
+            conf2 = st.checkbox("Confirmo eliminar los seleccionados", key="conf_prov_multi")
+            if st.button("🗑️ Eliminar seleccionados", disabled=not (elegidos and conf2),
+                         type="primary", key="btn_prov_multi"):
+                for et in elegidos:
+                    db.eliminar_proveedor(_pmap[et])
+                st.success(f"✅ Se eliminaron {len(elegidos)} proveedor(es) y sus facturas.")
+                st.rerun()
+        st.divider()
 
     for prov in proveedores:
         stats = db.get_resumen_proveedor(prov['id'])
