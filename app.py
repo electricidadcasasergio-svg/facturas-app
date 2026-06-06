@@ -3,7 +3,7 @@ import io
 import contextlib
 import tempfile
 import zipfile
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -25,7 +25,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.06-f"
+APP_VERSION = "2026.06.06-g"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -1054,7 +1054,7 @@ elif page == "📄 Facturas":
 
     col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 1])
     prov_sel    = col1.selectbox("Proveedor", list(prov_map.keys()))
-    fecha_desde = col2.date_input("Desde", value=date(date.today().year, 1, 1))
+    fecha_desde = col2.date_input("Desde", value=date.today() - timedelta(days=365))
     fecha_hasta = col3.date_input("Hasta", value=date.today())
     estado_sel  = col4.selectbox("Estado", ["Todas", "⏳ Pendientes", "✅ Pagas"])
     tipo_sel    = col5.selectbox("Tipo", ["Todos", "FC", "ND", "NC"])
