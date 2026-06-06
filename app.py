@@ -25,7 +25,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.05-i"
+APP_VERSION = "2026.06.05-j"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -399,8 +399,9 @@ COMPRADOR_DEFAULT = '20-14018158-8'
 
 
 @st.cache_data(show_spinner=False)
-def _extraer_factura(datos_bytes, nombre):
-    """Extrae los datos de un comprobante (cacheado por contenido → no re-hace OCR)."""
+def _extraer_factura(datos_bytes, nombre, _v=APP_VERSION):
+    """Extrae los datos de un comprobante (cacheado por contenido → no re-hace OCR).
+    _v incluye la versión: al actualizar el programa, la caché se invalida sola."""
     suffix = Path(nombre).suffix.lower()
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(datos_bytes)
