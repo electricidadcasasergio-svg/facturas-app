@@ -25,7 +25,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.05-j"
+APP_VERSION = "2026.06.06-a"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -1219,6 +1219,18 @@ elif page == "📄 Facturas":
                 st.success("✅ Factura eliminada correctamente.")
                 st.rerun()
 
+        # Borrar facturas por AÑO (limpieza de históricos viejos)
+        if hasattr(db, 'delete_facturas_por_fecha'):
+            st.markdown("---")
+            st.markdown("**Borrar facturas por año**")
+            anio = st.selectbox("Año a borrar", [2024, 2025, 2026], index=1, key="del_anio")
+            conf_anio = st.checkbox(f"Confirmo borrar TODAS las facturas del año {anio}",
+                                    key="conf_del_anio")
+            if st.button(f"🗑️ Borrar facturas de {anio}", disabled=not conf_anio, key="del_anio_btn"):
+                n = db.delete_facturas_por_fecha(f"{anio}-01-01", f"{anio}-12-31")
+                st.success(f"✅ Se eliminaron {n} factura(s) del año {anio}.")
+                st.rerun()
+
         # Borrar TODAS las de un proveedor (útil para recargar un histórico)
         if prov_sel != "Todos" and hasattr(db, 'delete_facturas_proveedor'):
             st.markdown("---")
@@ -1651,124 +1663,152 @@ elif page == "📊 Cta. Cte.":
 # 🔍  SKUs
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "🔍 SKUs":
-    _page_header("🔍", "SKUs", "Búsqueda de códigos y evolución de precios")
+    _page_header("🔍", "SKUs", "Dashboard por proveedor, búsqueda y evolución de precios")
 
     proveedores = db.get_proveedores()
     prov_map    = {"Todos": None} | {p['nombre']: p['id'] for p in proveedores}
 
-    col1, col2 = st.columns([3, 1])
-    buscar   = col1.text_input(
-        "Buscar por código o descripción (opcional si elegís un proveedor)",
-        placeholder="ej: VAMD100CA3  o  VOLTAMETRO  o  087402",
-    )
-    prov_sel = col2.selectbox("Proveedor", list(prov_map.keys()), key="prov_sku")
+    tab_dash, tab_busc = st.tabs(["📊 Dashboard por proveedor", "🔍 Buscar / evolución de precios"])
 
-    prov_id_sku = prov_map[prov_sel]
+    # ── PESTAÑA DASHBOARD ─────────────────────────────────────────────────────
+    with tab_dash:
+        if not proveedores:
+            st.info("Todavía no hay proveedores cargados.")
+        else:
+            cda, cdb = st.columns([3, 1])
+            prov_d = cda.selectbox("Proveedor", [p['nombre'] for p in proveedores], key="dash_prov")
+            top_n  = cdb.selectbox("Top", [10, 25, 50], index=1, key="dash_topn")
+            pid = prov_map[prov_d]
+            monedas = db.get_monedas_proveedor(pid)
+            sim = "U$S" if monedas == ['USD'] else "$"
 
-    # Permitir buscar sin texto si hay un proveedor elegido → lista todos sus productos
-    if not buscar and prov_id_sku is None:
-        st.info("Escribí un código/descripción, o elegí un proveedor para ver todos sus productos.")
-        st.stop()
+            rdash = db.get_resumen_dash_proveedor(pid)
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("🧾 Facturas", f"{rdash['n_facturas']:,}")
+            d2.metric("🔖 SKUs distintos", f"{rdash['n_skus']:,}")
+            d3.metric("📦 Unidades", f"{rdash['unidades']:,.0f}")
+            d4.metric(f"💰 Gasto {sim}", f"{sim} {rdash['gasto']:,.0f}")
 
-    # Más resultados cuando se listan todos los productos de un proveedor
-    limite = 500 if not buscar else 100
-    resultados = db.search_skus(buscar, prov_id_sku, limit=limite)
-    if not resultados:
-        st.warning("No se encontraron productos para ese criterio.")
-        st.stop()
+            top = db.get_top_skus_proveedor(pid, top_n)
+            por_mes = db.get_unidades_por_mes_proveedor(pid)
 
-    if not buscar:
-        st.caption(f"Mostrando {len(resultados)} producto(s) de **{prov_sel}** "
-                   f"(ordenados por más comprados).")
+            if top:
+                st.markdown(f"#### 🏆 Top {top_n} SKUs de {prov_d} (por gasto)")
+                df_top = pd.DataFrame(top)
+                df_top['etq'] = df_top['sku'].str.slice(0, 22)
+                fig_top = px.bar(
+                    df_top.sort_values('gasto'), x='gasto', y='etq', orientation='h',
+                    hover_data={'descripcion': True, 'unidades': ':.0f', 'etq': False},
+                    labels={'gasto': f'Gasto ({sim})', 'etq': 'SKU'},
+                )
+                fig_top.update_layout(height=max(300, 22 * len(df_top)))
+                st.plotly_chart(fig_top, use_container_width=True)
 
-    df_res = pd.DataFrame(resultados)
-    st.dataframe(
-        df_res[['sku', 'descripcion', 'proveedor_nombre',
-                'veces_comprado', 'total_unidades', 'ultima_compra']],
-        use_container_width=True,
-        column_config={
-            'sku':              'Código',
-            'descripcion':      'Descripción',
-            'proveedor_nombre': 'Proveedor',
-            'veces_comprado':   'Facturas',
-            'total_unidades':   st.column_config.NumberColumn('Unidades', format="%.0f"),
-            'ultima_compra':    'Última compra',
-        },
-        hide_index=True,
-    )
+                st.dataframe(
+                    df_top[['sku', 'descripcion', 'veces', 'unidades', 'gasto']],
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        'sku': 'Código', 'descripcion': 'Descripción',
+                        'veces': 'Facturas',
+                        'unidades': st.column_config.NumberColumn('Unidades', format="%.0f"),
+                        'gasto': st.column_config.NumberColumn(f'Gasto {sim}', format="%.2f"),
+                    })
 
-    st.divider()
-    _desc_por_sku = {r['sku']: r['descripcion'] for r in resultados}
-    skus_sel = st.multiselect(
-        "Elegí uno o varios artículos para ver la evolución de precio:",
-        [r['sku'] for r in resultados],
-        format_func=lambda s: f"{s}  —  {_desc_por_sku.get(s, '')}",
-    )
+            if por_mes:
+                st.markdown("#### 📅 Compras por mes")
+                df_mes = pd.DataFrame(por_mes)
+                cg1, cg2 = st.columns(2)
+                fig_u = px.bar(df_mes, x='mes', y='unidades',
+                               labels={'mes': 'Mes', 'unidades': 'Unidades'},
+                               title="Unidades compradas por mes")
+                fig_u.update_layout(xaxis_tickangle=-45)
+                cg1.plotly_chart(fig_u, use_container_width=True)
+                fig_g = px.bar(df_mes, x='mes', y='gasto',
+                               labels={'mes': 'Mes', 'gasto': f'Gasto ({sim})'},
+                               title=f"Gasto por mes ({sim})")
+                fig_g.update_layout(xaxis_tickangle=-45)
+                cg2.plotly_chart(fig_g, use_container_width=True)
 
-    if skus_sel:
-        # Recolectar el historial de cada SKU elegido
-        frames = []
-        for sku in skus_sel:
-            det = db.get_items_by_sku(sku, prov_id_sku)
-            if det:
-                dft = pd.DataFrame(det)
-                dft['sku'] = sku
-                frames.append(dft)
+            if not top and not por_mes:
+                st.info(f"No hay ítems cargados de {prov_d} todavía.")
 
-        if not frames:
-            st.info("Sin datos de compra para los artículos elegidos.")
-            st.stop()
+    # ── PESTAÑA BUSCAR / EVOLUCIÓN ────────────────────────────────────────────
+    with tab_busc:
+        col1, col2 = st.columns([3, 1])
+        buscar   = col1.text_input(
+            "Buscar por código o descripción (opcional si elegís un proveedor)",
+            placeholder="ej: ITM-63  o  TERMOMAGNETICO  o  NXB", key="busc_sku")
+        prov_sel = col2.selectbox("Proveedor", list(prov_map.keys()), key="prov_sku")
+        prov_id_sku = prov_map[prov_sel]
 
-        df_all = pd.concat(frames, ignore_index=True)
-        moneda = df_all['moneda'].iloc[0] if 'moneda' in df_all.columns else 'ARS'
+        if not buscar and prov_id_sku is None:
+            st.info("Escribí un código/descripción, o elegí un proveedor para ver sus productos.")
+        else:
+            limite = 500 if not buscar else 100
+            resultados = db.search_skus(buscar, prov_id_sku, limit=limite)
+            if not resultados:
+                st.warning("No se encontraron productos para ese criterio.")
+            else:
+                if not buscar:
+                    st.caption(f"Mostrando {len(resultados)} producto(s) de **{prov_sel}**.")
+                df_res = pd.DataFrame(resultados)
+                st.dataframe(
+                    df_res[['sku', 'descripcion', 'proveedor_nombre',
+                            'veces_comprado', 'total_unidades', 'ultima_compra']],
+                    use_container_width=True,
+                    column_config={
+                        'sku': 'Código', 'descripcion': 'Descripción',
+                        'proveedor_nombre': 'Proveedor', 'veces_comprado': 'Facturas',
+                        'total_unidades': st.column_config.NumberColumn('Unidades', format="%.0f"),
+                        'ultima_compra': 'Última compra',
+                    }, hide_index=True)
 
-        # Gráfico: una línea por artículo
-        fig = go.Figure()
-        for sku in skus_sel:
-            d = df_all[df_all['sku'] == sku].sort_values('fecha')
-            if d.empty:
-                continue
-            etiqueta = f"{sku} — {_desc_por_sku.get(sku, '')[:30]}"
-            fig.add_trace(go.Scatter(
-                x=d['fecha_display'],
-                y=d['precio_neto_unit'],
-                mode='lines+markers',
-                name=etiqueta,
-                marker=dict(size=7),
-            ))
-        fig.update_layout(
-            title="Evolución de precio neto por artículo",
-            xaxis_title='Fecha',
-            yaxis_title=f'Precio neto unitario ({moneda})',
-            hovermode='x unified',
-            legend=dict(orientation='h', yanchor='bottom', y=-0.4),
-        )
-        st.plotly_chart(fig, use_container_width=True)
+                st.divider()
+                _desc_por_sku = {r['sku']: r['descripcion'] for r in resultados}
+                skus_sel = st.multiselect(
+                    "Elegí uno o varios artículos para ver la evolución de precio:",
+                    [r['sku'] for r in resultados],
+                    format_func=lambda s: f"{s}  —  {_desc_por_sku.get(s, '')}")
 
-        # Tabla historial combinada
-        cols_show = [c for c in
-            ['sku', 'factura_numero', 'fecha_display', 'proveedor_nombre',
-             'cantidad', 'precio_unit', 'descuento_pct',
-             'precio_neto_unit', 'iva_pct', 'subtotal_siva']
-            if c in df_all.columns]
-        st.dataframe(
-            df_all[cols_show].rename(columns={
-                'sku':             'Código',
-                'factura_numero':  'Factura',
-                'fecha_display':   'Fecha',
-                'proveedor_nombre':'Proveedor',
-                'cantidad':        'Cant.',
-                'precio_unit':     'Precio lista',
-                'descuento_pct':   'Dto%',
-                'precio_neto_unit':'Precio neto',
-                'iva_pct':         'IVA%',
-                'subtotal_siva':   'Subtotal s/IVA',
-            }),
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.caption("👆 Seleccioná artículos arriba para ver y comparar su evolución de precio.")
+                if skus_sel:
+                    frames = []
+                    for sku in skus_sel:
+                        det = db.get_items_by_sku(sku, prov_id_sku)
+                        if det:
+                            dft = pd.DataFrame(det); dft['sku'] = sku; frames.append(dft)
+                    if frames:
+                        df_all = pd.concat(frames, ignore_index=True)
+                        moneda = df_all['moneda'].iloc[0] if 'moneda' in df_all.columns else 'ARS'
+                        fig = go.Figure()
+                        for sku in skus_sel:
+                            d = df_all[df_all['sku'] == sku].sort_values('fecha')
+                            if d.empty:
+                                continue
+                            fig.add_trace(go.Scatter(
+                                x=d['fecha_display'], y=d['precio_neto_unit'],
+                                mode='lines+markers', marker=dict(size=7),
+                                name=f"{sku} — {_desc_por_sku.get(sku, '')[:30]}"))
+                        fig.update_layout(title="Evolución de precio neto por artículo",
+                                          xaxis_title='Fecha',
+                                          yaxis_title=f'Precio neto unitario ({moneda})',
+                                          hovermode='x unified',
+                                          legend=dict(orientation='h', yanchor='bottom', y=-0.4))
+                        st.plotly_chart(fig, use_container_width=True)
+                        cols_show = [c for c in
+                            ['sku', 'factura_numero', 'fecha_display', 'proveedor_nombre',
+                             'cantidad', 'precio_unit', 'descuento_pct',
+                             'precio_neto_unit', 'iva_pct', 'subtotal_siva']
+                            if c in df_all.columns]
+                        st.dataframe(
+                            df_all[cols_show].rename(columns={
+                                'sku': 'Código', 'factura_numero': 'Factura',
+                                'fecha_display': 'Fecha', 'proveedor_nombre': 'Proveedor',
+                                'cantidad': 'Cant.', 'precio_unit': 'Precio lista',
+                                'descuento_pct': 'Dto%', 'precio_neto_unit': 'Precio neto',
+                                'iva_pct': 'IVA%', 'subtotal_siva': 'Subtotal s/IVA',
+                            }), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("👆 Seleccioná artículos para ver su evolución de precio.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

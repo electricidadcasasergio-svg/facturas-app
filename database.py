@@ -466,6 +466,65 @@ def get_resumen_pagos():
     return dict(row)
 
 
+def get_top_skus_proveedor(proveedor_id, limite=25):
+    """Top SKUs de un proveedor por gasto (excluye notas de crédito)."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT i.sku,
+                   MAX(i.descripcion)       AS descripcion,
+                   COUNT(DISTINCT f.id)     AS veces,
+                   SUM(i.cantidad)          AS unidades,
+                   SUM(i.subtotal_siva)     AS gasto
+            FROM items i JOIN facturas f ON i.factura_id = f.id
+            WHERE f.proveedor_id = ? AND COALESCE(f.tipo,'FC') != 'NC'
+            GROUP BY i.sku
+            ORDER BY gasto DESC
+            LIMIT ?
+        """, (proveedor_id, limite)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_unidades_por_mes_proveedor(proveedor_id):
+    """Unidades y gasto por mes (YYYY-MM) de un proveedor (excluye notas de crédito)."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT substr(f.fecha, 1, 7)  AS mes,
+                   SUM(i.cantidad)        AS unidades,
+                   SUM(i.subtotal_siva)   AS gasto
+            FROM items i JOIN facturas f ON i.factura_id = f.id
+            WHERE f.proveedor_id = ? AND COALESCE(f.tipo,'FC') != 'NC'
+                  AND f.fecha IS NOT NULL AND f.fecha != ''
+            GROUP BY mes ORDER BY mes
+        """, (proveedor_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_resumen_dash_proveedor(proveedor_id):
+    """Métricas globales del proveedor para el dashboard."""
+    with get_conn() as conn:
+        r = conn.execute("""
+            SELECT COUNT(DISTINCT f.id)                 AS n_facturas,
+                   COUNT(DISTINCT i.sku)                AS n_skus,
+                   COALESCE(SUM(i.cantidad), 0)         AS unidades,
+                   COALESCE(SUM(i.subtotal_siva), 0)    AS gasto
+            FROM facturas f LEFT JOIN items i ON i.factura_id = f.id
+            WHERE f.proveedor_id = ? AND COALESCE(f.tipo,'FC') != 'NC'
+        """, (proveedor_id,)).fetchone()
+    return dict(r)
+
+
+def delete_facturas_por_fecha(desde_iso, hasta_iso):
+    """Elimina facturas (e ítems) con fecha entre desde_iso y hasta_iso (YYYY-MM-DD)."""
+    with get_conn() as conn:
+        ids = [r['id'] for r in conn.execute(
+            "SELECT id FROM facturas WHERE fecha >= ? AND fecha <= ?",
+            (desde_iso, hasta_iso)).fetchall()]
+        for fid in ids:
+            conn.execute("DELETE FROM items WHERE factura_id = ?", (fid,))
+            conn.execute("DELETE FROM facturas WHERE id = ?", (fid,))
+    return len(ids)
+
+
 def delete_facturas_proveedor(proveedor_id, comprador=None):
     """Elimina TODAS las facturas (y sus ítems) de un proveedor. Opcional por empresa."""
     cond, par = "", []
