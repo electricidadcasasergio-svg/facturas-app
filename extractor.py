@@ -246,6 +246,9 @@ def _parse_full(text, filename, tables=None, config=None):
     elif '30-57472306-6' in text:
         header.setdefault('proveedor_nombre', 'ARGENPLAS S.A.')
         items = _items_argenplas(text)
+    elif '30-65503724-8' in text:
+        header.setdefault('proveedor_nombre', 'CONEXTUBE S.A.')
+        items = _items_conextube(text)
     else:
         header_hint = config.get('header_trigger') if config else None
         items = _items_generic(tables, text,
@@ -345,6 +348,7 @@ def _parse_header(text, filename):
     # Excluir fechas de "Inicio de Actividades" / "Vencimiento" (no son la fecha de la factura)
     if not h.get('fecha'):
         for pat in [
+            r'FECHA\s*FACTURA\s*:?\s*(\d{2}/\d{2}/\d{4})',          # FECHA FACTURA30/12/2025 (Conextube)
             r'(?:Fecha(?!\s*(?:de\s+)?(?:Inicio|Vto|Venc))[^\n:]*:|FECHA:)\s*(\d{2}/\d{2}/\d{4})',
             r'(?:Fecha\s+emisi[oó]n:?\s*)(\d{2}/\d{2}/\d{4})',
             r'\bFecha:\s*(\d{2}/\d{2}/\d{4})',
@@ -418,6 +422,7 @@ def _parse_header(text, filename):
         '30-70900997-0': 'BUHO ELECTROMECANICA S.A.',
         '30-71418460-8': 'GRUPO HLC S.R.L.',
         '30-57472306-6': 'ARGENPLAS S.A.',
+        '30-65503724-8': 'CONEXTUBE S.A.',
     }
     for cuit_known, nombre_known in _nombres_por_cuit.items():
         if cuit_known in text:
@@ -583,12 +588,13 @@ def _parse_header(text, filename):
             h['subtotal'] = _parse_num(m.group(1))
 
     if not h.get('iva_21'):
-        m = re.search(r'IVA[\s_]*21[%,°]?\s*[:\$]?\s*(?:USD\s*)?([\d.,]+)', text, re.IGNORECASE)
+        # tolera "IVA 21%", "IVA: 21 $", "IVA_21", "IVA 21 $ 94.942,56"
+        m = re.search(r'IVA[\s_:]*21\s*[%°]?\s*[:\$]?\s*(?:USD\s*)?([\d.,]+)', text, re.IGNORECASE)
         if m:
             h['iva_21'] = _parse_num(m.group(1))
 
     if not h.get('iva_105'):
-        m = re.search(r'IVA[\s_]*10[,.]?5[%,°]?\s*[:\$]?\s*(?:USD\s*)?([\d.,]+)', text, re.IGNORECASE)
+        m = re.search(r'IVA[\s_:]*10[,.]?5\s*[%°]?\s*[:\$]?\s*(?:USD\s*)?([\d.,]+)', text, re.IGNORECASE)
         if m:
             h['iva_105'] = _parse_num(m.group(1))
 
@@ -1206,6 +1212,68 @@ def _items_hlc(text):
             'cantidad':         qty,
             'precio_unit':      unitario,
             'descuento_pct':    0.0,
+            'precio_neto_unit': neto,
+            'iva_pct':          21.0,
+            'subtotal_siva':    importe,
+        })
+
+    return items
+
+
+# ── Parser CONEXTUBE S.A. (CUIT 30-65503724-8) ───────────────────────────────
+# Columnas: Cant | Cod. Art. | Detalle | Pcio. Un | Dto. | Importe
+# Formato numérico AMERICANO (103,362.47). Cantidad primero, código segundo.
+
+def _items_conextube(text):
+    items = []
+    lines = text.split('\n')
+    in_table = False
+
+    def _num(s):
+        s = re.sub(r'[\s%$]', '', str(s)).strip().replace(',', '')
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+
+    ITEM_RE = re.compile(
+        r'^(\d+(?:[.,]\d+)?)\s+'          # cantidad
+        r'([A-Z0-9][A-Z0-9\-/.]*)\s+'    # código
+        r'(.+?)\s+'                       # detalle
+        r'([\d.,]+)\s+'                   # precio unitario
+        r'([\d.,]+)\s+'                   # descuento %
+        r'([\d.,]+)$',                    # importe
+        re.IGNORECASE
+    )
+
+    for line in lines:
+        lu = line.upper()
+        if not in_table:
+            if 'CANT' in lu and ('COD' in lu) and 'IMPORTE' in lu:
+                in_table = True
+            continue
+        if re.match(r'\s*(SUBTOTAL|El\s+importe|A\s+los\s+efectos|LOS\s+CHEQUES|'
+                    r'IVA[:\s]|T\s*O\s*T\s*A\s*L|En\s+caso|Regimen)', line, re.IGNORECASE):
+            break
+        s = line.strip()
+        if not s:
+            continue
+        m = ITEM_RE.match(s)
+        if not m:
+            if items and not re.search(r'\d{2,}', s):   # continuación de descripción
+                items[-1]['descripcion'] += ' ' + s
+            continue
+        cant = _num(m.group(1))
+        precio = _num(m.group(4))
+        dto = _num(m.group(5))
+        importe = _num(m.group(6))
+        neto = round(importe / cant, 4) if cant else precio
+        items.append({
+            'sku':              m.group(2),
+            'descripcion':      m.group(3).strip(),
+            'cantidad':         cant,
+            'precio_unit':      precio,
+            'descuento_pct':    dto,
             'precio_neto_unit': neto,
             'iva_pct':          21.0,
             'subtotal_siva':    importe,
