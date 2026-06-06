@@ -513,6 +513,36 @@ def get_resumen_dash_proveedor(proveedor_id):
     return dict(r)
 
 
+def get_proveedores_sin_cuit():
+    """Devuelve proveedores cuyo CUIT NO es válido (formato XX-XXXXXXXX-X)."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT p.id, p.nombre, p.cuit,
+                   (SELECT COUNT(*) FROM facturas f WHERE f.proveedor_id = p.id) AS n_fact
+            FROM proveedores p
+        """).fetchall()
+    out = []
+    for r in rows:
+        if not re.match(r'^\d{2}-\d{8}-\d$', str(r['cuit'] or '')):
+            out.append(dict(r))
+    return out
+
+
+def eliminar_proveedores_sin_cuit():
+    """Borra los proveedores con CUIT inválido y todas sus facturas/ítems/pagos."""
+    ids = [p['id'] for p in get_proveedores_sin_cuit()]
+    with get_conn() as conn:
+        for pid in ids:
+            fids = [r['id'] for r in conn.execute(
+                "SELECT id FROM facturas WHERE proveedor_id = ?", (pid,)).fetchall()]
+            for fid in fids:
+                conn.execute("DELETE FROM items WHERE factura_id = ?", (fid,))
+            conn.execute("DELETE FROM facturas   WHERE proveedor_id = ?", (pid,))
+            conn.execute("DELETE FROM pagos      WHERE proveedor_id = ?", (pid,))
+            conn.execute("DELETE FROM proveedores WHERE id = ?", (pid,))
+    return len(ids)
+
+
 def delete_facturas_por_fecha(desde_iso, hasta_iso):
     """Elimina facturas (e ítems) con fecha entre desde_iso y hasta_iso (YYYY-MM-DD)."""
     with get_conn() as conn:

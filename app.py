@@ -25,7 +25,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.06-c"
+APP_VERSION = "2026.06.06-d"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -2033,6 +2033,25 @@ elif page == "📚 Catálogos":
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "🏢 Proveedores":
     _page_header("🏢", "Proveedores", "Resumen de actividad por proveedor")
+
+    # 🧹 Limpieza de proveedores sin CUIT válido (basura de cargas viejas)
+    if hasattr(db, 'get_proveedores_sin_cuit'):
+        sin_cuit = db.get_proveedores_sin_cuit()
+        if sin_cuit:
+            with st.expander(f"🧹 Limpiar proveedores sin CUIT válido ({len(sin_cuit)})", expanded=True):
+                st.caption("Estos proveedores no tienen un CUIT válido (suelen venir de cargas "
+                           "viejas o adjuntos que no eran facturas). Al borrarlos se eliminan "
+                           "también sus facturas e ítems.")
+                st.dataframe(
+                    pd.DataFrame([{'Nombre': p['nombre'], 'CUIT': p['cuit'], 'Facturas': p['n_fact']}
+                                  for p in sin_cuit]),
+                    use_container_width=True, hide_index=True)
+                conf = st.checkbox("Confirmo eliminar todos estos proveedores", key="conf_sincuit")
+                if st.button("🗑️ Eliminar proveedores sin CUIT", disabled=not conf, type="primary"):
+                    n = db.eliminar_proveedores_sin_cuit()
+                    st.success(f"✅ Se eliminaron {n} proveedor(es) sin CUIT y sus facturas.")
+                    st.rerun()
+            st.divider()
 
     proveedores = db.get_proveedores()
     if not proveedores:
