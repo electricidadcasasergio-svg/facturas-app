@@ -25,7 +25,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.06-b"
+APP_VERSION = "2026.06.06-c"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -613,9 +613,13 @@ def cargar_factura_auto(nombre, datos_bytes):
                    or (db.get_proveedor_nombre_por_cuit(prov_cuit) if prov_cuit else '')
                    or '')
 
-    if not numero or not prov_nombre:
+    # Solo cargar automáticamente si hay un CUIT de proveedor VÁLIDO (no propio).
+    # Evita crear proveedores "basura" desde adjuntos que no son facturas.
+    import re as _re_v
+    cuit_ok = bool(_re_v.match(r'^\d{2}-\d{8}-\d$', prov_cuit)) and prov_cuit not in COMPRADORES
+    if not numero or not prov_nombre or not cuit_ok:
         return {'estado': 'manual', 'nombre': nombre,
-                'detalle': 'no se detectó número o proveedor'}
+                'detalle': 'no se detectó número o CUIT de proveedor válido'}
 
     if db.factura_ya_cargada(prov_cuit, numero, tipo, comprador):
         return {'estado': 'duplicada', 'nombre': nombre,
