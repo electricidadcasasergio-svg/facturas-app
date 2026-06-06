@@ -25,7 +25,7 @@ importlib.reload(db)
 importlib.reload(email_facturas)
 
 # Versión del programa (subila cada vez que hay cambios para verificar actualizaciones)
-APP_VERSION = "2026.06.06-a"
+APP_VERSION = "2026.06.06-b"
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -1665,7 +1665,12 @@ elif page == "📊 Cta. Cte.":
 elif page == "🔍 SKUs":
     _page_header("🔍", "SKUs", "Dashboard por proveedor, búsqueda y evolución de precios")
 
-    proveedores = db.get_proveedores()
+    import re as _re_cuit
+    def _cuit_valido(c):
+        return bool(_re_cuit.match(r'^\d{2}-\d{8}-\d$', str(c or '')))
+
+    # Solo proveedores con CUIT válido (evita nombres sueltos / 'sin-cuit-...')
+    proveedores = [p for p in db.get_proveedores() if _cuit_valido(p['cuit'])]
     prov_map    = {"Todos": None} | {p['nombre']: p['id'] for p in proveedores}
 
     tab_dash, tab_busc = st.tabs(["📊 Dashboard por proveedor", "🔍 Buscar / evolución de precios"])
